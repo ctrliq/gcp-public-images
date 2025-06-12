@@ -1,0 +1,55 @@
+FROM docker.io/rockylinux/rockylinux:9 AS base
+
+# Update system, enable CRB, install EPEL, Development Tools, Go, Git, Python, and other essentials
+RUN dnf update -y && \
+    dnf install -y dnf-plugins-core && \
+    dnf config-manager --set-enabled crb && \
+    dnf install -y epel-release && \
+    dnf group install -y "Development Tools" && \
+    dnf install --allowerasing -y bash curl git vim jq tar gzip make gcc && \
+    dnf install -y golang && \
+    # Clean up dnf cache
+    dnf clean all
+
+# Set temporary working directory for cloning/building
+WORKDIR /tmp
+# Clone Daisy repository anonymously
+RUN git clone https://github.com/GoogleCloudPlatform/compute-daisy.git && \
+    cd compute-daisy/cli && \
+    # Build the Daisy CLI using Go
+    go build . && \
+    # Move the built binary to a standard location in the PATH
+    mv cli /usr/local/bin/daisy && \
+    # Clean up the source code directory
+    cd / && rm -rf /tmp/compute-daisy
+
+# Final image containing the Daisy binary and Google Cloud CLI
+FROM docker.io/rockylinux/rockylinux:9
+
+# Copy the Daisy binary from the base image
+COPY --from=base /usr/local/bin/daisy /usr/local/bin/daisy
+
+# Set up Google Cloud SDK repository and install SDK
+RUN curl -O https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg && \
+    rpm --import rpm-package-key.gpg && \
+    rm -f rpm-package-key.gpg && \
+    # Create the repo file using individual echo commands to avoid heredoc issues
+    echo "[google-cloud-sdk]" > /etc/yum.repos.d/google-cloud-sdk.repo && \
+    echo "name=Google Cloud SDK" >> /etc/yum.repos.d/google-cloud-sdk.repo && \
+    echo "baseurl=https://packages.cloud.google.com/yum/repos/cloud-sdk-el9-\$basearch" >> /etc/yum.repos.d/google-cloud-sdk.repo && \
+    echo "enabled=1" >> /etc/yum.repos.d/google-cloud-sdk.repo && \
+    echo "gpgcheck=1" >> /etc/yum.repos.d/google-cloud-sdk.repo && \
+    echo "gpgkey=https://packages.cloud.google.com/yum/doc/yum-key.gpg https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg" >> /etc/yum.repos.d/google-cloud-sdk.repo && \
+    # Install Google Cloud SDK using the new repo and clean up in the same layer
+    dnf install -y google-cloud-cli git jq && \
+    dnf clean all
+
+COPY automation/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]
+
+COPY daisy /daisy
+
+WORKDIR /daisy
+
+CMD [ "/bin/bash" ]
