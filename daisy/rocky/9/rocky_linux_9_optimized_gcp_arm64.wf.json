@@ -1,5 +1,5 @@
 {
-  "Name": "build-rocky-linux-9-gcp-arm64",
+  "Name": "build-rocky-linux-9-optimized-gcp-arm64",
   "Vars": {
     "installer_iso": {
       "Required": true,
