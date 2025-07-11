@@ -2,7 +2,7 @@
   "Name": "rocky-linux-9",
   "Project": "gce-ciq-images",
   "Zone": "us-central1-b",
-  "GCSPath": "gs://gce-image-build-bucket/daisy/${USERNAME}",
+  "GCSPath": "gs://gce-ciq-images-build-bucket/daisy/${USERNAME}",
   "Vars": {
     "build_date": {
       "Value": "${TIMESTAMP}",
@@ -41,7 +41,7 @@
     "build": {
       "TimeOut": "60m",
       "IncludeWorkflow": {
-        "Path": "${workflow_root}/rocky/8/rocky_linux_9.wf.json",
+        "Path": "${workflow_root}/rocky/9/rocky_linux_9.wf.json",
         "Vars": {
           "build_date": "${build_date}",
           "google_cloud_repo": "${google_cloud_repo}",

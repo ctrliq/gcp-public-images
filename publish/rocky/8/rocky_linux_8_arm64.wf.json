@@ -64,7 +64,7 @@
     },
     "cleanup-image": {
       "DeleteResources": {
-        "Images": ["rocky-linux-8-v${build_date}"]
+        "Images": ["rocky-linux-8-arm64-v${build_date}"]
       }
     }
   },
