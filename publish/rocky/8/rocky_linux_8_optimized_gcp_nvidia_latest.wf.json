@@ -1,8 +1,8 @@
 {
   "Name": "rocky-linux-8-optimized-gcp-nvidia-latest",
-  "Project": "gce-image-builder",
+  "Project": "gce-ciq-images",
   "Zone": "us-central1-b",
-  "GCSPath": "gs://gce-image-build-bucket/daisy/${USERNAME}",
+  "GCSPath": "gs://gce-ciq-images-build-bucket/daisy/${USERNAME}",
   "Vars": {
     "build_date": {
       "Value": "${TIMESTAMP}",
@@ -41,7 +41,7 @@
     "build": {
       "TimeOut": "60m",
       "IncludeWorkflow": {
-        "Path": "${workflow_root}/image_build/enterprise_linux/rocky_linux_8_optimized_gcp_nvidia_latest.wf.json",
+        "Path": "${workflow_root}/rocky/8/rocky_linux_8_optimized_gcp_nvidia_latest.wf.json",
         "Vars": {
           "build_date": "${build_date}",
           "installer_iso": "${installer_iso}"
