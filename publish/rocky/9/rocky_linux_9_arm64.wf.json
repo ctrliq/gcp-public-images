@@ -17,7 +17,7 @@
       "Description": "Root of github workflows, defaults to /workflows in the container."
     },
     "gcs_url": {
-      "Value": "gs://gce-ciq-images-prod-artifacts",
+      "Value": "gs://gce-ciq-images-prod-artifacts/${NAME}-v${TIMESTAMP}.tar.gz",
       "Description": "The GCS path that image raw file exported to."
     },
     "sbom_destination": {
