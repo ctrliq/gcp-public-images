@@ -17,7 +17,7 @@
       "Description": "Root of github workflows, defaults to /workflows in the container."
     },
     "gcs_url": {
-      "Required": true,
+      "Value": "gs://gce-ciq-images-prod-artifacts/${NAME}-v${TIMESTAMP}.tar.gz",
       "Description": "The GCS path that image raw file exported to."
     },
     "sbom_destination": {
@@ -25,7 +25,7 @@
       "Description": "SBOM final export destination, copies in place by default"
     },
     "installer_iso": {
-      "Required": true,
+      "Value": "gs://gce-ciq-images-base-isos/Rocky-9-aarch64-boot.iso",
       "Description": "The Rocky Linux 9 installer ISO to build from."
     },
     "sbom_util_gcs_root": {
