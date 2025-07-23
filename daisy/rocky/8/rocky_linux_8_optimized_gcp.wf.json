@@ -1,5 +1,5 @@
 {
-  "Name": "build-rocky-linux-8-gcp",
+  "Name": "build-rocky-linux-8-optimized-gcp",
   "Vars": {
     "installer_iso": {
       "Required": true,

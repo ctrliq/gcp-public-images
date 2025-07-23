@@ -1,8 +1,8 @@
 {
   "Name": "rocky-linux-9-optimized-gcp-arm64",
-  "Project": "gce-image-builder",
-  "Zone": "us-central1-b",
-  "GCSPath": "gs://gce-image-build-bucket/daisy/${USERNAME}",
+  "Project": "gce-ciq-images",
+  "Zone": "europe-west4-a",
+  "GCSPath": "gs://gce-ciq-images-build-bucket/daisy/${USERNAME}",
   "Vars": {
     "build_date": {
       "Value": "${TIMESTAMP}",
@@ -17,7 +17,7 @@
       "Description": "Root of github workflows, defaults to /workflows in the container."
     },
     "gcs_url": {
-      "Required": true,
+      "Value": "gs://gce-ciq-images-prod-artifacts/${NAME}-v${TIMESTAMP}.tar.gz",
       "Description": "The GCS path that image raw file exported to."
     },
     "sbom_destination": {
@@ -25,7 +25,7 @@
       "Description": "SBOM final export destination, copies in place by default"
     },
     "installer_iso": {
-      "Required": true,
+      "Value": "gs://gce-ciq-images-base-isos/Rocky-9-aarch64-boot.iso",
       "Description": "The Rocky Linux 9 installer ISO to build from."
     },
     "sbom_util_gcs_root": {
@@ -41,7 +41,7 @@
     "build": {
       "TimeOut": "60m",
       "IncludeWorkflow": {
-        "Path": "${workflow_root}/image_build/enterprise_linux/rocky_linux_9_optimized_gcp_arm64.wf.json",
+        "Path": "${workflow_root}/rocky/9/rocky_linux_9_optimized_gcp_arm64.wf.json",
         "Vars": {
           "build_date": "${build_date}",
           "installer_iso": "${installer_iso}"

@@ -1,5 +1,5 @@
 {
-  "Name": "rocky-linux-8-optimized-gcp-arm64",
+  "Name": "rocky-linux-8-arm64",
   "Project": "gce-ciq-images",
   "Zone": "us-central1-b",
   "GCSPath": "gs://gce-ciq-images-build-bucket/daisy/${USERNAME}",
@@ -41,9 +41,10 @@
     "build": {
       "TimeOut": "60m",
       "IncludeWorkflow": {
-        "Path": "${workflow_root}/rocky/8/rocky_linux_8_optimized_gcp_arm64.wf.json",
+        "Path": "${workflow_root}/rocky/8/rocky_linux_8_arm64.wf.json",
         "Vars": {
           "build_date": "${build_date}",
+          "google_cloud_repo": "${google_cloud_repo}",
           "installer_iso": "${installer_iso}"
         }
       }
@@ -63,7 +64,7 @@
     },
     "cleanup-image": {
       "DeleteResources": {
-        "Images": ["rocky-linux-8-optimized-gcp-arm64-v${build_date}"]
+        "Images": ["rocky-linux-8-arm64-v${build_date}"]
       }
     }
   },
