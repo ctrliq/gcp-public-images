@@ -1,7 +1,7 @@
 {
   "Name": "rocky-linux-9-arm64",
   "Project": "gce-ciq-images",
-  "Zone": "us-central1-b",
+  "Zone": "europe-west4-a",
   "GCSPath": "gs://gce-ciq-images-build-bucket/daisy/${USERNAME}",
   "Vars": {
     "build_date": {
