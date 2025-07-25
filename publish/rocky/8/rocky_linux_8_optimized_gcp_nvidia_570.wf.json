@@ -1,8 +1,8 @@
 {
   "Name": "rocky-linux-8-optimized-gcp-nvidia-570",
-  "Project": "gce-ciq-images",
+  "Project": "ciq-build-images",
   "Zone": "us-central1-b",
-  "GCSPath": "gs://gce-ciq-images-build-bucket/daisy/${USERNAME}",
+  "GCSPath": "gs://ciq-build-images-bucket/daisy/${USERNAME}",
   "Vars": {
     "build_date": {
       "Value": "${TIMESTAMP}",
