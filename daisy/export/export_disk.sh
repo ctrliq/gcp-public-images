@@ -92,7 +92,7 @@ function fetch_syft() {
   fi
 
   echo "GCEExport: Fetching syft: ${SBOM_UTIL_GCS_PATH}"
-  gsutil cp "${SBOM_UTIL_GCS_PATH%/}" syft_linux.tar.gz
+  gsutil cp "${SBOM_UTIL_GCS_PATH}" syft_linux.tar.gz
   tar -xf syft_linux.tar.gz
   chmod +x syft
 }
