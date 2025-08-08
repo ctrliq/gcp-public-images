@@ -77,47 +77,37 @@ if $SBOM_PATH == "" || $SHA256_PATH == ""; then
 fi
 
 # This function fetches the sbom-util executable from the gcs bucket.
-function fetch_sbomutil() {
-  echo "GCEExport: provided root path for sbom-util at [${SBOM_UTIL_GCS_ROOT}]"
+function fetch_syft() {
+  echo "GCEExport: provided root path for syft at [${SBOM_UTIL_GCS_ROOT}]"
   if [ -z "${SBOM_UTIL_GCS_ROOT}" ]; then
-    echo "GCEExport: SBOM_UTIL_GCS_ROOT is not defined, skipping sbomutil deployment..."
+    echo "GCEExport: SBOM_UTIL_GCS_ROOT is not defined, skipping syft deployment..."
     return
   fi
 
-  SBOM_UTIL_GCS_ROOT="${SBOM_UTIL_GCS_ROOT}/linux"
+  export SBOM_UTIL_GCS_PATH="${SBOM_UTIL_GCS_ROOT}/syft_linux_amd64.tar.gz"
 
   # suffix the gcs path with arm64 if necessary
   if [ "$(uname -m)" == "aarch64" ]; then
-    SBOM_UTIL_GCS_ROOT="${SBOM_UTIL_GCS_ROOT}_arm64"
+    export SBOM_UTIL_GCS_PATH="${SBOM_UTIL_GCS_ROOT}/syft_linux_arm64.tar.gz"
   fi
 
-  echo "GCEExport: listing sbom-util versions at [${SBOM_UTIL_GCS_ROOT}]"
-  # Determine the latest sbomutil gcs path if available
-  if [ -n "${SBOM_UTIL_GCS_ROOT}" ]; then
-    SBOM_UTIL_GCS_PATH=$(gsutil ls $SBOM_UTIL_GCS_ROOT | tail -1)
-    echo "GCEExport: gsutil list completed with status [$?]"
-  fi
-
-  echo "GCEExport: searching for sbom-util at [${SBOM_UTIL_GCS_PATH}]"
-  # Fetch sbomutil from gcs if available
-  if [ -n "${SBOM_UTIL_GCS_PATH}" ]; then
-    echo "GCEExport: Fetching sbomutil: ${SBOM_UTIL_GCS_PATH}"
-    gsutil cp "${SBOM_UTIL_GCS_PATH%/}/sbomutil" sbomutil
-    chmod +x sbomutil
-  fi
+  echo "GCEExport: Fetching syft: ${SBOM_UTIL_GCS_PATH}"
+  gsutil cp "${SBOM_UTIL_GCS_PATH}" syft_linux.tar.gz
+  tar -xf syft_linux.tar.gz
+  chmod +x syft
 }
 
-# This function runs SBOM generation using either syft or sbom-util, depending on the first argument.
+# This function runs SBOM generation using either syft
 function runSBOMGeneration() {
   # Get the partition with the largest size from the mounted disk by sorting.
   SBOM_DISK_PARTITION=$(lsblk $SOURCE_DISK_SYMPATH --output=name -l -b --sort=size | tail -2 | head -1)
   mount /dev/$SBOM_DISK_PARTITION /mnt
   mount -o bind,ro /dev /mnt/dev
-  echo "GCEExport: Running sbom generation with the sbom-util program"
-  fetch_sbomutil
-  ./sbomutil --archetype=linux-image --comp_name=$SOURCE_DISK_NAME --output=image.sbom.json
+  echo "GCEExport: Running sbom generation with the syft program"
+  fetch_syft
+  ./syft scan dir:/mnt -o spdx-json > image.sbom.json
   sbom_error_code=$?
-  if [ $sbom_error_code != 0 ]; then 
+  if [ $sbom_error_code != 0 ]; then
     echo "ExportFailed: sbom generation failed with code $sbom_error_code"
     exit 1
   fi
