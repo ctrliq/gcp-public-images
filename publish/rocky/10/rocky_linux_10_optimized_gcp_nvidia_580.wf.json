@@ -1,7 +1,7 @@
 {
-  "Name": "rocky-linux-8-optimized-gcp-nvidia-550",
+  "Name": "rocky-linux-10-optimized-gcp-nvidia-580",
   "Project": "ciq-build-images",
-  "Zone": "us-central1-b",
+  "Zone": "europe-west4-a",
   "GCSPath": "gs://ciq-build-images-bucket/daisy/${USERNAME}",
   "Vars": {
     "build_date": {
@@ -25,8 +25,8 @@
       "Description": "SBOM final export destination, copies in place by default"
     },
     "installer_iso": {
-      "Value": "gs://gce-ciq-images-base-isos/Rocky-8-x86_64-boot.iso",
-      "Description": "The Rocky Linux 8 installer ISO to build from."
+      "Value": "gs://gce-ciq-images-base-isos/Rocky-10-x86_64-boot.iso",
+      "Description": "The Rocky Linux 10 installer ISO to build from."
     },
     "sbom_util_gcs_root": {
       "Value": "gs://gce-ciq-images-base-isos/syft",
@@ -41,7 +41,7 @@
     "build": {
       "TimeOut": "60m",
       "IncludeWorkflow": {
-        "Path": "${workflow_root}/rocky/8/rocky_linux_8_optimized_gcp_nvidia_550.wf.json",
+        "Path": "${workflow_root}/rocky/10/rocky_linux_10_optimized_gcp_nvidia_580.wf.json",
         "Vars": {
           "build_date": "${build_date}",
           "installer_iso": "${installer_iso}"
@@ -63,7 +63,7 @@
     },
     "cleanup-image": {
       "DeleteResources": {
-        "Images": ["rocky-linux-8-optimized-gcp-nvidia-550-v${build_date}"]
+        "Images": ["rocky-linux-10-optimized-gcp-nvidia-580-v${build_date}"]
       }
     }
   },
