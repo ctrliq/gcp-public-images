@@ -1,5 +1,5 @@
 {
-  "Name": "rocky-linux-9-optimized-gcp-nvidia-550",
+  "Name": "rocky-linux-10-optimized-gcp",
   "Project": "ciq-build-images",
   "Zone": "europe-west4-a",
   "GCSPath": "gs://ciq-build-images-bucket/daisy/${USERNAME}",
@@ -9,8 +9,8 @@
       "Description": "Build datestamp used to version the image."
     },
     "google_cloud_repo": {
-      "Value": "DEPRECATED",
-      "Description": "DEPRECATED. Included to ease transition of our pipelines, but not used."
+      "Value": "stable",
+      "Description": "The Google Cloud Repo branch to use."
     },
     "workflow_root": {
       "Value": "/workflows",
@@ -25,8 +25,8 @@
       "Description": "SBOM final export destination, copies in place by default"
     },
     "installer_iso": {
-      "Value": "gs://gce-ciq-images-base-isos/Rocky-9-x86_64-boot.iso",
-      "Description": "The Rocky Linux 9 installer ISO to build from."
+      "Value": "gs://gce-ciq-images-base-isos/Rocky-10-x86_64-boot.iso",
+      "Description": "The Rocky Linux 10 installer ISO to build from."
     },
     "sbom_util_gcs_root": {
       "Value": "gs://gce-ciq-images-base-isos/syft",
@@ -41,7 +41,7 @@
     "build": {
       "TimeOut": "60m",
       "IncludeWorkflow": {
-        "Path": "${workflow_root}/rocky/9/rocky_linux_9_optimized_gcp_nvidia_550.wf.json",
+        "Path": "${workflow_root}/rocky/10/rocky_linux_10_optimized_gcp.wf.json",
         "Vars": {
           "build_date": "${build_date}",
           "installer_iso": "${installer_iso}"
@@ -63,7 +63,7 @@
     },
     "cleanup-image": {
       "DeleteResources": {
-        "Images": ["rocky-linux-9-optimized-gcp-nvidia-550-v${build_date}"]
+        "Images": ["rocky-linux-10-optimized-gcp-v${build_date}"]
       }
     }
   },

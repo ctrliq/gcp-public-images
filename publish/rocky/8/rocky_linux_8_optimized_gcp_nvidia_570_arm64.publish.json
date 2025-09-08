@@ -1,0 +1,51 @@
+{{/*
+  Template to publish Rocky 8 optimized for GCP/Nvidia images.
+  By default this template is setup to publish to the 'ciq-build-images'
+  project, the 'environment' variable can be used to publish to 'test', 'prod'
+  DeleteAfter is set to 180 days for all environments other than prod where no
+  time period is set.
+*/}}
+{
+  "Name": "rocky-linux-8-optimized-gcp-nvidia-570-arm64",
+  {{$work_project := printf "%q" "ciq-build-images" -}}
+  {{$endpoint := `"https://www.googleapis.com/compute/alpha/projects/"` -}}
+  {{$delete_after := `"24h*30*2"` -}}
+  {{if eq .environment "test" -}}
+  "WorkProject": {{$work_project}},
+  "PublishProject": "gce-ciq-images",
+  "ComputeEndpoint": {{$endpoint}},
+  "DeleteAfter": {{$delete_after}},
+  {{- else if eq .environment "prod" -}}
+  "WorkProject": {{$work_project}},
+  "PublishProject": "rocky-linux-accelerator-cloud",
+  "ComputeEndpoint": {{$endpoint}},
+  {{- else if eq .environment "autopush" -}}
+  "WorkProject": {{$work_project}},
+  "PublishProject": "artifact-releaser-autopush",
+  "ComputeEndpoint": {{$endpoint}},
+  "DeleteAfter": "3h",
+  {{- else -}}
+  "WorkProject": {{$work_project}},
+  "PublishProject": {{$work_project}},
+  "ComputeEndpoint": {{$endpoint}},
+  "DeleteAfter": {{$delete_after}},
+  {{- end}}
+  {{$time := trimPrefix .publish_version "v"}}
+  "Images": [
+    {
+      "Prefix": "rocky-linux-8-optimized-gcp-nvidia-570-arm64",
+      "Family": "rocky-linux-8-optimized-gcp-nvidia-570-arm64",
+      "Description": "Rocky Linux, Rocky Linux, 8 with the Nvidia 570 driver, aarch64 optimized for GCP built on {{$time}}",
+      "Architecture": "ARM64",
+      "Licenses": [
+        "https://www.googleapis.com/compute/v1/projects/rocky-linux-accelerator-cloud/global/licenses/nvidia-570",
+        "https://www.googleapis.com/compute/v1/projects/rocky-linux-accelerator-cloud/global/licenses/rocky-linux-8-accelerated",
+        "https://www.googleapis.com/compute/v1/projects/rocky-linux-cloud/global/licenses/rocky-linux-8-optimized-gcp"
+      ],
+      "Labels": {
+        "public-image": "true"
+      },
+      "GuestOsFeatures": ["UEFI_COMPATIBLE", "GVNIC", "IDPF"]
+    }
+  ]
+}
