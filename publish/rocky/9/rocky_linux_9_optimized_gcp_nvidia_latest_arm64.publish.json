@@ -35,7 +35,7 @@
     {
       "Prefix": "rocky-linux-9-optimized-gcp-nvidia-latest-arm64",
       "Family": "rocky-linux-9-optimized-gcp-nvidia-latest-arm64",
-      "Description": "Rocky Linux, Rocky Linux, 9 with the latest Nvidia driver (570), aarch64 optimized for GCP built on {{$time}}",
+      "Description": "Rocky Linux, Rocky Linux, 9 with the latest Nvidia driver (580), aarch64 optimized for GCP built on {{$time}}",
       "Architecture": "ARM64",
       "Licenses": [
         "https://www.googleapis.com/compute/v1/projects/rocky-linux-accelerator-cloud/global/licenses/nvidia-latest",
