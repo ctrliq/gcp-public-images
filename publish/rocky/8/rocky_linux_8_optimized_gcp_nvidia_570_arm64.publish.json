@@ -45,7 +45,7 @@
       "Labels": {
         "public-image": "true"
       },
-      "GuestOsFeatures": ["UEFI_COMPATIBLE", "GVNIC", "IDPF"]
+      "GuestOsFeatures": ["UEFI_COMPATIBLE", "GVNIC"]
     }
   ]
 }
