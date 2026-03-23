@@ -16,6 +16,8 @@
 
 set -euo pipefail
 
+START_SECONDS=$SECONDS
+
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 WORKFLOW_ROOT="$REPO_ROOT/daisy"
 LOG_DIR="${LOG_DIR:-$REPO_ROOT/automation/tmp/daisy-builds-$(date +%Y%m%d-%H%M%S)}"
@@ -453,5 +455,7 @@ printf '  Build:   %d passed, %d failed (%d total)\n' "$build_pass" "$build_fail
 printf '  Publish: %d passed, %d failed, %d skipped/not-attempted\n' "$pub_pass" "$pub_fail" "$pub_skipped"
 echo ""
 echo "Logs: $LOG_DIR"
+elapsed=$((SECONDS - START_SECONDS))
+printf '  Total time: %dm %02ds\n' $((elapsed / 60)) $((elapsed % 60))
 
 [[ $overall_fail -eq 0 ]]
