@@ -155,7 +155,7 @@ _write_result() {
 
 # _get_field FILE KEY — extracts a single value from a result file.
 _get_field() {
-	grep -m1 "^${2}=" "$1" 2>/dev/null | cut -d= -f2-
+	grep -m1 "^${2}=" "$1" 2>/dev/null | cut -d= -f2- || true
 }
 
 # ---------------------------------------------------------------------------
