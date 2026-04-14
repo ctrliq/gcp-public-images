@@ -9,7 +9,7 @@
 # manual workflow) so relative paths in wf.json files resolve correctly.
 #
 # Usage:
-#   ./automation/build_all.sh [--dry-run] [--versions 8,9,10] [--retries N]
+#   ./automation/build_all.sh [--dry-run] [--versions 8,9,10] [--retries N] [--source-version VERSION]
 #
 # GOOGLE_APPLICATION_CREDENTIALS must be set in the environment before calling
 # this script (used by daisy). Publishing uses the local gcloud config dir.
@@ -26,6 +26,7 @@ WORKFLOWS=() # if non-empty, only these workflow names are run
 DRY_RUN=false
 MAX_RETRIES=1
 IF_IMAGE_EXISTS=fail # fail | skip | delete
+SOURCE_VERSION=""    # if set, skip build and publish this version directly
 
 # Zone to use per Rocky major version.
 declare -A VERSION_ZONE=(
@@ -78,8 +79,12 @@ while [[ $# -gt 0 ]]; do
 		IF_IMAGE_EXISTS="$2"
 		shift 2
 		;;
+	--source-version)
+		SOURCE_VERSION="$2"
+		shift 2
+		;;
 	*)
-		echo "Usage: $0 [--dry-run] [--versions 8,9,10] [--workflows name1,name2] [--retries N] [--if-image-exists fail|skip|delete]"
+		echo "Usage: $0 [--dry-run] [--versions 8,9,10] [--workflows name1,name2] [--retries N] [--if-image-exists fail|skip|delete] [--source-version VERSION]"
 		exit 1
 		;;
 	esac
@@ -126,13 +131,18 @@ if $DRY_RUN; then
 		local_publish_json="${local_wf_file%.wf.json}.publish.json"
 		printf "  [%s]\n" "$name"
 		printf "    [dir]     %s\n" "$local_wf_dir"
-		printf "    [build]   daisy -zone %s -var:workflow_root=%s %s\n" \
-			"$local_zone" "$WORKFLOW_ROOT" "$local_wf_file"
+		if [[ -n "$SOURCE_VERSION" ]]; then
+			printf "    [build]   SKIPPED (--source-version=%s)\n" "$SOURCE_VERSION"
+		else
+			printf "    [build]   daisy -zone %s -var:workflow_root=%s %s\n" \
+				"$local_zone" "$WORKFLOW_ROOT" "$local_wf_file"
+		fi
 		printf '    [publish] podman run %s \\\n' "${PUBLISH_CREDS[*]}"
 		printf '                -v %s:/workflows:z \\\n' "$local_wf_dir"
 		printf '                gcr.io/compute-image-tools/gce_image_publish:latest \\\n'
 		printf '                -source_gcs_path gs://gce-ciq-images-prod-artifacts \\\n'
-		printf '                -source_version <version> -no_root -skip_confirmation \\\n'
+		local_version_display="${SOURCE_VERSION:-<version>}"
+		printf '                -source_version %s -no_root -skip_confirmation \\\n' "$local_version_display"
 		printf '                -date_version -var:environment=test -rollout_rate 0 \\\n'
 		printf '                /workflows/%s\n\n' "$local_publish_json"
 	done
@@ -177,115 +187,123 @@ run_pipeline() {
 	local version=""
 	local image_name=""
 
-	# ---- Build + kickstart verification retry loop ----
-	while true; do
-		local daisy_log="$LOG_DIR/${name}.attempt${attempt}.daisy.log"
-		echo "[$name] Build attempt $attempt starting..."
+	# ---- Skip build if --source-version was provided ----
+	if [[ -n "$SOURCE_VERSION" ]]; then
+		version="$SOURCE_VERSION"
+		echo "[$name] Skipping build (--source-version=$version)."
+	else
 
-		# Run daisy from the workflow's publish directory.
-		if ! (cd "$wf_dir" && daisy \
-			-zone "$zone" \
-			-var:workflow_root="$WORKFLOW_ROOT" \
-			"$wf_file") >"$daisy_log" 2>&1; then
-			local daisy_exit=$?
-			echo "[$name] Attempt $attempt: daisy exited $daisy_exit. Log: $daisy_log"
-			if [[ $attempt -gt $MAX_RETRIES ]]; then
-				_write_result "$name" \
-					"BUILD_STATUS=FAIL" \
-					"BUILD_ATTEMPTS=$attempt" \
-					"BUILD_REASON=daisy-exited-${daisy_exit}"
-				return
+		# ---- Build + kickstart verification retry loop ----
+		while true; do
+			local daisy_log="$LOG_DIR/${name}.attempt${attempt}.daisy.log"
+			echo "[$name] Build attempt $attempt starting..."
+
+			# Run daisy from the workflow's publish directory.
+			if ! (cd "$wf_dir" && daisy \
+				-zone "$zone" \
+				-var:workflow_root="$WORKFLOW_ROOT" \
+				"$wf_file") >"$daisy_log" 2>&1; then
+				local daisy_exit=$?
+				echo "[$name] Attempt $attempt: daisy exited $daisy_exit. Log: $daisy_log"
+				if [[ $attempt -gt $MAX_RETRIES ]]; then
+					_write_result "$name" \
+						"BUILD_STATUS=FAIL" \
+						"BUILD_ATTEMPTS=$attempt" \
+						"BUILD_REASON=daisy-exited-${daisy_exit}"
+					return
+				fi
+				((attempt++)) || true
+				continue
 			fi
-			((attempt++)) || true
-			continue
-		fi
 
-		# Derive GCS paths from daisy stdout.
-		# Daisy prints: "Streaming instance ... serial port 1 output to https://..."
-		local serial_url
-		serial_url=$(grep -oP 'https://storage\.cloud\.google\.com/\S+serial-port1\.log' "$daisy_log" |
-			grep '/inst-build-' | tail -1 || true)
+			# Derive GCS paths from daisy stdout.
+			# Daisy prints: "Streaming instance ... serial port 1 output to https://..."
+			local serial_url
+			serial_url=$(grep -oP 'https://storage\.cloud\.google\.com/\S+serial-port1\.log' "$daisy_log" |
+				grep '/inst-build-' | tail -1 || true)
 
-		if [[ -z "$serial_url" ]]; then
-			echo "[$name] Attempt $attempt: serial log URL not found in daisy output. Log: $daisy_log"
-			if [[ $attempt -gt $MAX_RETRIES ]]; then
-				_write_result "$name" \
-					"BUILD_STATUS=FAIL" \
-					"BUILD_ATTEMPTS=$attempt" \
-					"BUILD_REASON=serial-log-url-not-found"
-				return
+			if [[ -z "$serial_url" ]]; then
+				echo "[$name] Attempt $attempt: serial log URL not found in daisy output. Log: $daisy_log"
+				if [[ $attempt -gt $MAX_RETRIES ]]; then
+					_write_result "$name" \
+						"BUILD_STATUS=FAIL" \
+						"BUILD_ATTEMPTS=$attempt" \
+						"BUILD_REASON=serial-log-url-not-found"
+					return
+				fi
+				((attempt++)) || true
+				continue
 			fi
-			((attempt++)) || true
-			continue
-		fi
 
-		local gcs_serial="gs://${serial_url#https://storage.cloud.google.com/}"
-		local gcs_log_dir
-		gcs_log_dir="$(dirname "$gcs_serial")"
-		local gcs_daisy_log="${gcs_log_dir}/daisy.log"
+			local gcs_serial="gs://${serial_url#https://storage.cloud.google.com/}"
+			local gcs_log_dir
+			gcs_log_dir="$(dirname "$gcs_serial")"
+			local gcs_daisy_log="${gcs_log_dir}/daisy.log"
 
-		# Check kickstart serial log for success.
-		if gcloud storage cat "$gcs_serial" 2>/dev/null | grep -q "Installation complete"; then
-			echo "[$name] Attempt $attempt: installation complete."
+			# Check kickstart serial log for success.
+			if gcloud storage cat "$gcs_serial" 2>/dev/null | grep -q "Installation complete"; then
+				echo "[$name] Attempt $attempt: installation complete."
 
-			# Extract image name and version from daisy.log.
-			# Expected line: CreateImages: Creating image "rocky-linux-9-v1774034849"
+				# Extract image name and version from daisy.log.
+				# Expected line: CreateImages: Creating image "rocky-linux-9-v1774034849"
+				image_name=$(gcloud storage cat "$gcs_daisy_log" 2>/dev/null |
+					grep -oP 'Creating image "\K[^"]+' | tail -1 || true)
+
+				if [[ -z "$image_name" ]]; then
+					echo "[$name] ERROR: could not extract image name from $gcs_daisy_log"
+					_write_result "$name" \
+						"BUILD_STATUS=FAIL" \
+						"BUILD_ATTEMPTS=$attempt" \
+						"BUILD_REASON=image-name-not-found-in-daisy-log"
+					return
+				fi
+
+				version=$(echo "$image_name" | grep -oP 'v\d+$' || true)
+
+				if [[ -z "$version" ]]; then
+					echo "[$name] ERROR: could not extract version from image name '$image_name'"
+					_write_result "$name" \
+						"BUILD_STATUS=FAIL" \
+						"BUILD_ATTEMPTS=$attempt" \
+						"BUILD_REASON=version-not-found-in-image-name"
+					return
+				fi
+
+				echo "[$name] Image: $image_name  Version: $version"
+				break # Proceed to publish.
+			fi
+
+			# Installation did not complete — delete the failed tarball and retry.
+			echo "[$name] Attempt $attempt: 'Installation complete' not found in serial log ($gcs_serial)."
+
 			image_name=$(gcloud storage cat "$gcs_daisy_log" 2>/dev/null |
 				grep -oP 'Creating image "\K[^"]+' | tail -1 || true)
 
-			if [[ -z "$image_name" ]]; then
-				echo "[$name] ERROR: could not extract image name from $gcs_daisy_log"
-				_write_result "$name" \
-					"BUILD_STATUS=FAIL" \
-					"BUILD_ATTEMPTS=$attempt" \
-					"BUILD_REASON=image-name-not-found-in-daisy-log"
-				return
-			fi
-
-			version=$(echo "$image_name" | grep -oP 'v\d+$' || true)
-
-			if [[ -z "$version" ]]; then
-				echo "[$name] ERROR: could not extract version from image name '$image_name'"
-				_write_result "$name" \
-					"BUILD_STATUS=FAIL" \
-					"BUILD_ATTEMPTS=$attempt" \
-					"BUILD_REASON=version-not-found-in-image-name"
-				return
-			fi
-
-			echo "[$name] Image: $image_name  Version: $version"
-			break # Proceed to publish.
-		fi
-
-		# Installation did not complete — delete the failed tarball and retry.
-		echo "[$name] Attempt $attempt: 'Installation complete' not found in serial log ($gcs_serial)."
-
-		image_name=$(gcloud storage cat "$gcs_daisy_log" 2>/dev/null |
-			grep -oP 'Creating image "\K[^"]+' | tail -1 || true)
-
-		if [[ -n "$image_name" ]]; then
-			local tarball="gs://gce-ciq-images-prod-artifacts/${image_name}.tar.gz"
-			echo "[$name] Deleting failed tarball: $tarball"
-			if gcloud storage rm "$tarball" --project=gce-ciq-images 2>/dev/null; then
-				echo "[$name] Tarball deleted."
+			if [[ -n "$image_name" ]]; then
+				local tarball="gs://gce-ciq-images-prod-artifacts/${image_name}.tar.gz"
+				echo "[$name] Deleting failed tarball: $tarball"
+				if gcloud storage rm "$tarball" --project=gce-ciq-images 2>/dev/null; then
+					echo "[$name] Tarball deleted."
+				else
+					echo "[$name] WARN: tarball deletion failed or object did not exist; continuing."
+				fi
 			else
-				echo "[$name] WARN: tarball deletion failed or object did not exist; continuing."
+				echo "[$name] WARN: could not determine tarball path from $gcs_daisy_log — nothing deleted."
 			fi
-		else
-			echo "[$name] WARN: could not determine tarball path from $gcs_daisy_log — nothing deleted."
-		fi
 
-		if [[ $attempt -gt $MAX_RETRIES ]]; then
-			echo "[$name] Max retries ($MAX_RETRIES) reached. Build failed."
-			_write_result "$name" \
-				"BUILD_STATUS=FAIL" \
-				"BUILD_ATTEMPTS=$attempt" \
-				"BUILD_REASON=no-installation-complete"
-			return
-		fi
+			if [[ $attempt -gt $MAX_RETRIES ]]; then
+				echo "[$name] Max retries ($MAX_RETRIES) reached. Build failed."
+				_write_result "$name" \
+					"BUILD_STATUS=FAIL" \
+					"BUILD_ATTEMPTS=$attempt" \
+					"BUILD_REASON=no-installation-complete"
+				return
+			fi
 
-		((attempt++)) || true
-	done
+			((attempt++)) || true
+		done
+
+	fi # end --source-version skip
 
 	# ---- Pre-publish: handle existing image if requested ----
 	if [[ "$IF_IMAGE_EXISTS" != "fail" ]]; then
@@ -303,7 +321,7 @@ run_pipeline() {
 				if [[ "$IF_IMAGE_EXISTS" == "skip" ]]; then
 					echo "[$name] Skipping publish (--if-image-exists=skip)."
 					_write_result "$name" \
-						"BUILD_STATUS=PASS" \
+						"BUILD_STATUS=$build_status_label" \
 						"BUILD_ATTEMPTS=$attempt" \
 						"BUILD_VERSION=$version" \
 						"PUBLISH_STATUS=SKIPPED"
@@ -324,7 +342,14 @@ run_pipeline() {
 	fi
 
 	# ---- Publish retry loop ----
-	# Build succeeded — only the publish is retried if it fails.
+	# Build succeeded (or skipped) — only the publish is retried if it fails.
+	local build_status_label
+	if [[ -n "$SOURCE_VERSION" ]]; then
+		build_status_label="SKIPPED"
+	else
+		build_status_label="PASS"
+	fi
+
 	local pub_attempt=1
 	while true; do
 		local pub_log="$LOG_DIR/${name}.publish.attempt${pub_attempt}.log"
@@ -342,7 +367,7 @@ run_pipeline() {
 			/workflows/"$publish_json" >"$pub_log" 2>&1; then
 			echo "[$name] Published successfully."
 			_write_result "$name" \
-				"BUILD_STATUS=PASS" \
+				"BUILD_STATUS=$build_status_label" \
 				"BUILD_ATTEMPTS=$attempt" \
 				"BUILD_VERSION=$version" \
 				"PUBLISH_STATUS=PASS" \
@@ -355,7 +380,7 @@ run_pipeline() {
 		if [[ $pub_attempt -gt $MAX_RETRIES ]]; then
 			echo "[$name] Max publish retries ($MAX_RETRIES) reached."
 			_write_result "$name" \
-				"BUILD_STATUS=PASS" \
+				"BUILD_STATUS=$build_status_label" \
 				"BUILD_ATTEMPTS=$attempt" \
 				"BUILD_VERSION=$version" \
 				"PUBLISH_STATUS=FAIL" \
@@ -423,6 +448,9 @@ for name in $(printf '%s\n' "${all_names[@]}" | sort); do
 	if [[ "$build_status" == "PASS" ]]; then
 		build_col="PASS (${build_attempts} att)"
 		((build_pass++)) || true
+	elif [[ "$build_status" == "SKIPPED" ]]; then
+		build_col="SKIPPED (--source-version)"
+		((build_pass++)) || true
 	else
 		build_col="FAIL (${build_attempts} att) [${build_reason}]"
 		((build_fail++)) || true
@@ -444,7 +472,7 @@ for name in $(printf '%s\n' "${all_names[@]}" | sort); do
 
 	printf '  %-55s  %-32s  %s\n' "$name" "$build_col" "$pub_col"
 
-	if [[ "$build_status" != "PASS" || ("$pub_status" != "PASS" && "$pub_status" != "SKIPPED") ]]; then
+	if [[ "$build_status" != "PASS" && "$build_status" != "SKIPPED" || ("$pub_status" != "PASS" && "$pub_status" != "SKIPPED") ]]; then
 		((overall_fail++)) || true
 	fi
 done

@@ -80,10 +80,28 @@ MOCK
     chmod +x "$MOCK_BIN/daisy"
 }
 
-# Mock gcloud that returns "Installation complete" for any input.
+# Mock gcloud that handles both serial log and daisy log requests.
 _mock_gcloud_pass() {
-    printf '#!/bin/bash\necho "Installation complete"\n' > "$MOCK_BIN/gcloud"
+    cat > "$MOCK_BIN/gcloud" <<'MOCK'
+#!/bin/bash
+if [[ "$*" == *"serial-port1.log"* ]]; then
+    echo "Installation complete"
+elif [[ "$*" == *"daisy.log"* ]]; then
+    echo 'CreateImages: Creating image "rocky-linux-8-v1234567890"'
+fi
+exit 0
+MOCK
     chmod +x "$MOCK_BIN/gcloud"
+}
+
+# Mock podman that always succeeds and records its args.
+_mock_podman_pass() {
+    cat > "$MOCK_BIN/podman" <<'MOCK'
+#!/bin/bash
+echo "podman $*" >> "$INVOCATION_LOG"
+exit 0
+MOCK
+    chmod +x "$MOCK_BIN/podman"
 }
 
 # ---------------------------------------------------------------------------
@@ -93,6 +111,7 @@ _mock_gcloud_pass() {
 @test "daisy is invoked with correct zone, workflow file, and working directory" {
     _mock_daisy_pass
     _mock_gcloud_pass
+    _mock_podman_pass
 
     run bash "$SCRIPT" --versions 8
 
@@ -109,6 +128,7 @@ _mock_gcloud_pass() {
     export FAILING_WF="rocky_linux_8"
     _mock_daisy_fail_once
     _mock_gcloud_pass
+    _mock_podman_pass
 
     run bash "$SCRIPT" --versions 8,9 --retries 1
 
@@ -132,4 +152,36 @@ _mock_gcloud_pass() {
     # initial attempt + 2 retries = 3 total invocations
     count=$(grep -c "rocky_linux_8.wf.json" "$INVOCATION_LOG")
     [ "$count" -eq 3 ]
+}
+
+@test "--source-version skips build and invokes publish with the correct version" {
+    _mock_daisy_pass
+    _mock_podman_pass
+
+    run bash "$SCRIPT" --versions 8 --source-version v1234567890
+
+    [ "$status" -eq 0 ]
+    # daisy must never be called
+    if [[ -f "$INVOCATION_LOG" ]]; then
+        ! grep -q "daisy" "$INVOCATION_LOG"
+    fi
+    # podman must be called with the correct source_version
+    grep -q "\-source_version v1234567890" "$INVOCATION_LOG"
+}
+
+@test "--source-version shows SKIPPED build status in summary" {
+    _mock_podman_pass
+
+    run bash "$SCRIPT" --versions 8 --source-version v1234567890
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"SKIPPED (--source-version)"* ]]
+}
+
+@test "--source-version dry-run shows SKIPPED instead of daisy command" {
+    run bash "$SCRIPT" --versions 8 --source-version v1234567890 --dry-run
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"SKIPPED (--source-version=v1234567890)"* ]]
+    ! [[ "$output" == *"daisy -zone"* ]]
 }
