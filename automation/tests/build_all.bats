@@ -185,3 +185,42 @@ MOCK
     [[ "$output" == *"SKIPPED (--source-version=v1234567890)"* ]]
     ! [[ "$output" == *"daisy -zone"* ]]
 }
+
+@test "--skip-publish builds but does not invoke publish" {
+    _mock_daisy_pass
+    _mock_gcloud_pass
+    _mock_podman_pass
+
+    run bash "$SCRIPT" --versions 8 --skip-publish
+
+    [ "$status" -eq 0 ]
+    # daisy must be called (build runs normally)
+    grep -q "rocky_linux_8.wf.json" "$INVOCATION_LOG"
+    # podman must not be called (publish skipped)
+    ! grep -q "podman" "$INVOCATION_LOG"
+    [[ "$output" == *"SKIPPED (--skip-publish)"* ]]
+}
+
+@test "--skip-publish dry-run shows SKIPPED publish but still shows daisy command" {
+    run bash "$SCRIPT" --versions 8 --skip-publish --dry-run
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"SKIPPED (--skip-publish)"* ]]
+    ! [[ "$output" == *"gce_image_publish"* ]]
+    [[ "$output" == *"daisy -zone"* ]]
+}
+
+@test "--skip-publish with --source-version skips both build and publish" {
+    _mock_podman_pass
+
+    run bash "$SCRIPT" --versions 8 --skip-publish --source-version v1234567890
+
+    [ "$status" -eq 0 ]
+    # neither daisy nor podman should be called
+    if [[ -f "$INVOCATION_LOG" ]]; then
+        ! grep -q "daisy" "$INVOCATION_LOG"
+        ! grep -q "podman" "$INVOCATION_LOG"
+    fi
+    [[ "$output" == *"SKIPPED (--source-version)"* ]]
+    [[ "$output" == *"SKIPPED (--skip-publish)"* ]]
+}

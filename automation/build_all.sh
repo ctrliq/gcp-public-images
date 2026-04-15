@@ -9,7 +9,7 @@
 # manual workflow) so relative paths in wf.json files resolve correctly.
 #
 # Usage:
-#   ./automation/build_all.sh [--dry-run] [--versions 8,9,10] [--retries N] [--source-version VERSION]
+#   ./automation/build_all.sh [--dry-run] [--versions 8,9,10] [--retries N] [--source-version VERSION] [--skip-publish]
 #
 # GOOGLE_APPLICATION_CREDENTIALS must be set in the environment before calling
 # this script (used by daisy). Publishing uses the local gcloud config dir.
@@ -27,6 +27,7 @@ DRY_RUN=false
 MAX_RETRIES=1
 IF_IMAGE_EXISTS=fail # fail | skip | delete
 SOURCE_VERSION=""    # if set, skip build and publish this version directly
+SKIP_PUBLISH=false   # if true, build only — do not publish
 
 # Zone to use per Rocky major version.
 declare -A VERSION_ZONE=(
@@ -83,8 +84,12 @@ while [[ $# -gt 0 ]]; do
 		SOURCE_VERSION="$2"
 		shift 2
 		;;
+	--skip-publish)
+		SKIP_PUBLISH=true
+		shift
+		;;
 	*)
-		echo "Usage: $0 [--dry-run] [--versions 8,9,10] [--workflows name1,name2] [--retries N] [--if-image-exists fail|skip|delete] [--source-version VERSION]"
+		echo "Usage: $0 [--dry-run] [--versions 8,9,10] [--workflows name1,name2] [--retries N] [--if-image-exists fail|skip|delete] [--source-version VERSION] [--skip-publish]"
 		exit 1
 		;;
 	esac
@@ -137,14 +142,18 @@ if $DRY_RUN; then
 			printf "    [build]   daisy -zone %s -var:workflow_root=%s %s\n" \
 				"$local_zone" "$WORKFLOW_ROOT" "$local_wf_file"
 		fi
-		printf '    [publish] podman run %s \\\n' "${PUBLISH_CREDS[*]}"
-		printf '                -v %s:/workflows:z \\\n' "$local_wf_dir"
-		printf '                gcr.io/compute-image-tools/gce_image_publish:latest \\\n'
-		printf '                -source_gcs_path gs://gce-ciq-images-prod-artifacts \\\n'
-		local_version_display="${SOURCE_VERSION:-<version>}"
-		printf '                -source_version %s -no_root -skip_confirmation \\\n' "$local_version_display"
-		printf '                -date_version -var:environment=test -rollout_rate 0 \\\n'
-		printf '                /workflows/%s\n\n' "$local_publish_json"
+		if $SKIP_PUBLISH; then
+			printf "    [publish] SKIPPED (--skip-publish)\n\n"
+		else
+			printf '    [publish] podman run %s \\\n' "${PUBLISH_CREDS[*]}"
+			printf '                -v %s:/workflows:z \\\n' "$local_wf_dir"
+			printf '                gcr.io/compute-image-tools/gce_image_publish:latest \\\n'
+			printf '                -source_gcs_path gs://gce-ciq-images-prod-artifacts \\\n'
+			local_version_display="${SOURCE_VERSION:-<version>}"
+			printf '                -source_version %s -no_root -skip_confirmation \\\n' "$local_version_display"
+			printf '                -date_version -var:environment=test -rollout_rate 0 \\\n'
+			printf '                /workflows/%s\n\n' "$local_publish_json"
+		fi
 	done
 	exit 0
 fi
@@ -305,6 +314,24 @@ run_pipeline() {
 
 	fi # end --source-version skip
 
+	# ---- Skip publish if --skip-publish was provided ----
+	if $SKIP_PUBLISH; then
+		local build_status_label
+		if [[ -n "$SOURCE_VERSION" ]]; then
+			build_status_label="SKIPPED"
+		else
+			build_status_label="PASS"
+		fi
+		echo "[$name] Skipping publish (--skip-publish)."
+		_write_result "$name" \
+			"BUILD_STATUS=$build_status_label" \
+			"BUILD_ATTEMPTS=$attempt" \
+			"BUILD_VERSION=$version" \
+			"PUBLISH_STATUS=SKIPPED" \
+			"PUBLISH_REASON=--skip-publish"
+		return
+	fi
+
 	# ---- Pre-publish: handle existing image if requested ----
 	if [[ "$IF_IMAGE_EXISTS" != "fail" ]]; then
 		local image_prefix today published_image
@@ -463,7 +490,11 @@ for name in $(printf '%s\n' "${all_names[@]}" | sort); do
 		pub_col="PASS (${pub_attempts} att) [${build_version}]"
 		((pub_pass++)) || true
 	elif [[ "$pub_status" == "SKIPPED" ]]; then
-		pub_col="SKIPPED (image already exists) [${build_version}]"
+		if [[ "$pub_reason" == "--skip-publish" ]]; then
+			pub_col="SKIPPED (--skip-publish) [${build_version}]"
+		else
+			pub_col="SKIPPED (image already exists) [${build_version}]"
+		fi
 		((pub_skipped++)) || true
 	else
 		pub_col="FAIL (${pub_attempts} att) [${pub_reason}]"
