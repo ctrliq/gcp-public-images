@@ -252,6 +252,7 @@ run_pipeline() {
 			# Check kickstart serial log for success.
 			if gcloud storage cat "$gcs_serial" 2>/dev/null | grep -q "Installation complete"; then
 				echo "[$name] Attempt $attempt: installation complete."
+				echo "[$name] Serial log: $serial_url"
 
 				# Extract image name and version from daisy.log.
 				# Expected line: CreateImages: Creating image "rocky-linux-9-v1774034849"
