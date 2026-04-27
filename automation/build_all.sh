@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build, verify, and publish Rocky Linux images to the test environment.
+# Build, verify, and publish Rocky Linux images.
 #
 # Each workflow runs its full pipeline independently in parallel:
 #   build (daisy) → check kickstart log → [delete tarball + retry if failed]
@@ -9,7 +9,7 @@
 # manual workflow) so relative paths in wf.json files resolve correctly.
 #
 # Usage:
-#   ./automation/build_all.sh [--dry-run] [--versions 8,9,10] [--retries N] [--source-version VERSION] [--skip-publish]
+#   ./automation/build_all.sh [--dry-run] [--versions 8,9,10] [--retries N] [--source-version VERSION] [--skip-publish] [--environment test|prod]
 #
 # GOOGLE_APPLICATION_CREDENTIALS must be set in the environment before calling
 # this script (used by daisy). Publishing uses the local gcloud config dir.
@@ -28,6 +28,13 @@ MAX_RETRIES=1
 IF_IMAGE_EXISTS=fail # fail | skip | delete
 SOURCE_VERSION=""    # if set, skip build and publish this version directly
 SKIP_PUBLISH=false   # if true, build only — do not publish
+ENVIRONMENT=test     # test | prod
+
+# GCP project per target environment.
+declare -A ENV_PROJECT=(
+	[test]="gce-ciq-images"
+	[prod]="rocky-linux-cloud"
+)
 
 # Zone to use per Rocky major version.
 declare -A VERSION_ZONE=(
@@ -88,12 +95,39 @@ while [[ $# -gt 0 ]]; do
 		SKIP_PUBLISH=true
 		shift
 		;;
+	--environment)
+		if [[ "$2" != "test" && "$2" != "prod" ]]; then
+			echo "ERROR: --environment must be one of: test, prod" >&2
+			exit 1
+		fi
+		ENVIRONMENT="$2"
+		shift 2
+		;;
 	*)
-		echo "Usage: $0 [--dry-run] [--versions 8,9,10] [--workflows name1,name2] [--retries N] [--if-image-exists fail|skip|delete] [--source-version VERSION] [--skip-publish]"
+		echo "Usage: $0 [--dry-run] [--versions 8,9,10] [--workflows name1,name2] [--retries N] [--if-image-exists fail|skip|delete] [--source-version VERSION] [--skip-publish] [--environment test|prod]"
 		exit 1
 		;;
 	esac
 done
+
+# ---------------------------------------------------------------------------
+# Production safety guards.
+# ---------------------------------------------------------------------------
+if [[ "$ENVIRONMENT" == "prod" ]]; then
+	if [[ -z "$SOURCE_VERSION" ]]; then
+		echo "ERROR: --source-version is required when --environment=prod" >&2
+		exit 1
+	fi
+	if [[ "$IF_IMAGE_EXISTS" == "delete" ]]; then
+		echo "ERROR: --if-image-exists=delete is not allowed when --environment=prod" >&2
+		exit 1
+	fi
+fi
+
+PUBLISH_EXTRA_ARGS=()
+if [[ "$ENVIRONMENT" == "test" ]]; then
+	PUBLISH_EXTRA_ARGS=(-rollout_rate 0)
+fi
 
 # ---------------------------------------------------------------------------
 # Build workflow index: name -> (path, dir, zone).
@@ -151,11 +185,35 @@ if $DRY_RUN; then
 			printf '                -source_gcs_path gs://gce-ciq-images-prod-artifacts \\\n'
 			local_version_display="${SOURCE_VERSION:-<version>}"
 			printf '                -source_version %s -no_root -skip_confirmation \\\n' "$local_version_display"
-			printf '                -date_version -var:environment=test -rollout_rate 0 \\\n'
+			if [[ "$ENVIRONMENT" == "test" ]]; then
+				printf '                -date_version -var:environment=test -rollout_rate 0 \\\n'
+			else
+				printf '                -date_version -var:environment=%s \\\n' "$ENVIRONMENT"
+			fi
 			printf '                /workflows/%s\n\n' "$local_publish_json"
 		fi
 	done
 	exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Production confirmation prompt.
+# ---------------------------------------------------------------------------
+if [[ "$ENVIRONMENT" == "prod" ]]; then
+	echo ""
+	echo "=== PRODUCTION PUBLISH ==="
+	echo "  Environment:    prod (target project: ${ENV_PROJECT[prod]})"
+	echo "  Source version: $SOURCE_VERSION"
+	echo "  Workflows:      ${#all_names[@]}"
+	for name in "${all_names[@]}"; do
+		printf '    - %s\n' "$name"
+	done
+	echo ""
+	read -r -p "Proceed with production publish? [y/N] " confirm
+	if [[ "$confirm" != [yY] ]]; then
+		echo "Aborted."
+		exit 1
+	fi
 fi
 
 mkdir -p "$LOG_DIR"
@@ -390,8 +448,8 @@ run_pipeline() {
 			-source_gcs_path gs://gce-ciq-images-prod-artifacts \
 			-source_version "$version" \
 			-no_root -skip_confirmation -date_version \
-			-var:environment=test \
-			-rollout_rate 0 \
+			-var:environment="$ENVIRONMENT" \
+			"${PUBLISH_EXTRA_ARGS[@]}" \
 			/workflows/"$publish_json" >"$pub_log" 2>&1; then
 			echo "[$name] Published successfully."
 			_write_result "$name" \

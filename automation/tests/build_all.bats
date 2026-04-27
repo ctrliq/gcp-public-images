@@ -224,3 +224,73 @@ MOCK
     [[ "$output" == *"SKIPPED (--source-version)"* ]]
     [[ "$output" == *"SKIPPED (--skip-publish)"* ]]
 }
+
+# ---------------------------------------------------------------------------
+# --environment tests
+# ---------------------------------------------------------------------------
+
+@test "--environment prod requires --source-version" {
+    run bash "$SCRIPT" --versions 8 --environment prod
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--source-version is required when --environment=prod"* ]]
+}
+
+@test "--environment prod rejects --if-image-exists=delete" {
+    run bash "$SCRIPT" --versions 8 --environment prod --source-version v123 --if-image-exists delete
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--if-image-exists=delete is not allowed when --environment=prod"* ]]
+}
+
+@test "--environment rejects invalid values" {
+    run bash "$SCRIPT" --versions 8 --environment staging
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--environment must be one of: test, prod"* ]]
+}
+
+@test "--environment prod dry-run shows prod environment without rollout_rate" {
+    run bash "$SCRIPT" --versions 8 --source-version v123 --environment prod --dry-run
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"var:environment=prod"* ]]
+    ! [[ "$output" == *"rollout_rate"* ]]
+}
+
+@test "default environment is test with rollout_rate 0 in dry-run" {
+    run bash "$SCRIPT" --versions 8 --source-version v123 --dry-run
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"var:environment=test"* ]]
+    [[ "$output" == *"rollout_rate 0"* ]]
+}
+
+@test "--environment prod publishes with prod environment and no rollout_rate" {
+    _mock_podman_pass
+
+    run bash -c "echo y | bash '$SCRIPT' --versions 8 --source-version v123 --environment prod"
+
+    [ "$status" -eq 0 ]
+    grep -q "var:environment=prod" "$INVOCATION_LOG"
+    ! grep -q "rollout_rate" "$INVOCATION_LOG"
+}
+
+@test "--environment prod aborts when confirmation denied" {
+    _mock_podman_pass
+
+    run bash -c "echo n | bash '$SCRIPT' --versions 8 --source-version v123 --environment prod"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Aborted"* ]]
+}
+
+@test "--environment prod shows confirmation prompt with workflow details" {
+    _mock_podman_pass
+
+    run bash -c "echo n | bash '$SCRIPT' --versions 8 --source-version v123 --environment prod"
+
+    [[ "$output" == *"PRODUCTION PUBLISH"* ]]
+    [[ "$output" == *"rocky-linux-cloud"* ]]
+    [[ "$output" == *"rocky_linux_8"* ]]
+}
