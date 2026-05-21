@@ -9,7 +9,7 @@
 # manual workflow) so relative paths in wf.json files resolve correctly.
 #
 # Usage:
-#   ./automation/build_all.sh [--dry-run] [--versions 8,9,10] [--retries N] [--source-version VERSION] [--skip-publish] [--environment test|prod]
+#   ./automation/build_all.sh [--dry-run] [--versions 8,9,10] [--retries N] [--source-version VERSION] [--source-results DIR] [--skip-publish] [--environment test|prod]
 #
 # GOOGLE_APPLICATION_CREDENTIALS must be set in the environment before calling
 # this script (used by daisy). Publishing uses the local gcloud config dir.
@@ -27,6 +27,7 @@ DRY_RUN=false
 MAX_RETRIES=1
 IF_IMAGE_EXISTS=fail # fail | skip | delete
 SOURCE_VERSION=""    # if set, skip build and publish this version directly
+SOURCE_RESULTS_DIR="" # if set, read per-workflow BUILD_VERSION from .result files
 SKIP_PUBLISH=false   # if true, build only — do not publish
 ENVIRONMENT=test     # test | prod
 
@@ -91,6 +92,10 @@ while [[ $# -gt 0 ]]; do
 		SOURCE_VERSION="$2"
 		shift 2
 		;;
+	--source-results)
+		SOURCE_RESULTS_DIR="$2"
+		shift 2
+		;;
 	--skip-publish)
 		SKIP_PUBLISH=true
 		shift
@@ -104,18 +109,30 @@ while [[ $# -gt 0 ]]; do
 		shift 2
 		;;
 	*)
-		echo "Usage: $0 [--dry-run] [--versions 8,9,10] [--workflows name1,name2] [--retries N] [--if-image-exists fail|skip|delete] [--source-version VERSION] [--skip-publish] [--environment test|prod]"
+		echo "Usage: $0 [--dry-run] [--versions 8,9,10] [--workflows name1,name2] [--retries N] [--if-image-exists fail|skip|delete] [--source-version VERSION] [--source-results DIR] [--skip-publish] [--environment test|prod]"
 		exit 1
 		;;
 	esac
 done
 
 # ---------------------------------------------------------------------------
+# Validate --source-version / --source-results.
+# ---------------------------------------------------------------------------
+if [[ -n "$SOURCE_VERSION" && -n "$SOURCE_RESULTS_DIR" ]]; then
+	echo "ERROR: --source-version and --source-results are mutually exclusive" >&2
+	exit 1
+fi
+if [[ -n "$SOURCE_RESULTS_DIR" && ! -d "$SOURCE_RESULTS_DIR" ]]; then
+	echo "ERROR: --source-results directory does not exist: $SOURCE_RESULTS_DIR" >&2
+	exit 1
+fi
+
+# ---------------------------------------------------------------------------
 # Production safety guards.
 # ---------------------------------------------------------------------------
 if [[ "$ENVIRONMENT" == "prod" ]]; then
-	if [[ -z "$SOURCE_VERSION" ]]; then
-		echo "ERROR: --source-version is required when --environment=prod" >&2
+	if [[ -z "$SOURCE_VERSION" && -z "$SOURCE_RESULTS_DIR" ]]; then
+		echo "ERROR: --source-version or --source-results is required when --environment=prod" >&2
 		exit 1
 	fi
 	if [[ "$IF_IMAGE_EXISTS" == "delete" ]]; then
@@ -158,6 +175,27 @@ for version in "${VERSIONS[@]}"; do
 	done
 done
 
+# _get_field FILE KEY — extracts a single value from a result file.
+_get_field() {
+	grep -m1 "^${2}=" "$1" 2>/dev/null | cut -d= -f2- || true
+}
+
+# Validate that every selected workflow has a result file with a BUILD_VERSION.
+if [[ -n "$SOURCE_RESULTS_DIR" ]]; then
+	_missing=()
+	for name in "${all_names[@]}"; do
+		rf="$SOURCE_RESULTS_DIR/${name}.result"
+		if [[ ! -f "$rf" ]] || [[ -z $(_get_field "$rf" BUILD_VERSION) ]]; then
+			_missing+=("$name")
+		fi
+	done
+	if [[ ${#_missing[@]} -gt 0 ]]; then
+		echo "ERROR: --source-results is missing BUILD_VERSION for:" >&2
+		printf '  %s\n' "${_missing[@]}" >&2
+		exit 1
+	fi
+fi
+
 # ---------------------------------------------------------------------------
 # Dry run: print the full pipeline per workflow and exit.
 # ---------------------------------------------------------------------------
@@ -170,7 +208,10 @@ if $DRY_RUN; then
 		local_publish_json="${local_wf_file%.wf.json}.publish.json"
 		printf "  [%s]\n" "$name"
 		printf "    [dir]     %s\n" "$local_wf_dir"
-		if [[ -n "$SOURCE_VERSION" ]]; then
+		if [[ -n "$SOURCE_RESULTS_DIR" ]]; then
+			local_result_version=$(_get_field "$SOURCE_RESULTS_DIR/${name}.result" BUILD_VERSION)
+			printf "    [build]   SKIPPED (--source-results version=%s)\n" "${local_result_version:-MISSING}"
+		elif [[ -n "$SOURCE_VERSION" ]]; then
 			printf "    [build]   SKIPPED (--source-version=%s)\n" "$SOURCE_VERSION"
 		else
 			printf "    [build]   daisy -zone %s -var:workflow_root=%s %s\n" \
@@ -183,7 +224,12 @@ if $DRY_RUN; then
 			printf '                -v %s:/workflows:z \\\n' "$local_wf_dir"
 			printf '                gcr.io/compute-image-tools/gce_image_publish:latest \\\n'
 			printf '                -source_gcs_path gs://gce-ciq-images-prod-artifacts \\\n'
-			local_version_display="${SOURCE_VERSION:-<version>}"
+			if [[ -n "$SOURCE_RESULTS_DIR" ]]; then
+				local_version_display=$(_get_field "$SOURCE_RESULTS_DIR/${name}.result" BUILD_VERSION)
+				local_version_display="${local_version_display:-MISSING}"
+			else
+				local_version_display="${SOURCE_VERSION:-<version>}"
+			fi
 			printf '                -source_version %s -no_root -skip_confirmation \\\n' "$local_version_display"
 			if [[ "$ENVIRONMENT" == "test" ]]; then
 				printf '                -date_version -var:environment=test -rollout_rate 0 \\\n'
@@ -203,10 +249,19 @@ if [[ "$ENVIRONMENT" == "prod" ]]; then
 	echo ""
 	echo "=== PRODUCTION PUBLISH ==="
 	echo "  Environment:    prod (target project: ${ENV_PROJECT[prod]})"
-	echo "  Source version: $SOURCE_VERSION"
+	if [[ -n "$SOURCE_RESULTS_DIR" ]]; then
+		echo "  Source:         --source-results $SOURCE_RESULTS_DIR"
+	else
+		echo "  Source version: $SOURCE_VERSION"
+	fi
 	echo "  Workflows:      ${#all_names[@]}"
 	for name in "${all_names[@]}"; do
-		printf '    - %s\n' "$name"
+		if [[ -n "$SOURCE_RESULTS_DIR" ]]; then
+			local_ver=$(_get_field "$SOURCE_RESULTS_DIR/${name}.result" BUILD_VERSION)
+			printf '    - %-55s  %s\n' "$name" "${local_ver:-MISSING}"
+		else
+			printf '    - %s\n' "$name"
+		fi
 	done
 	echo ""
 	read -r -p "Proceed with production publish? [y/N] " confirm
@@ -230,11 +285,6 @@ _write_result() {
 	printf '%s\n' "$@" >"$RESULT_DIR/${name}.result"
 }
 
-# _get_field FILE KEY — extracts a single value from a result file.
-_get_field() {
-	grep -m1 "^${2}=" "$1" 2>/dev/null | cut -d= -f2- || true
-}
-
 # ---------------------------------------------------------------------------
 # run_pipeline NAME
 #   Runs the full build → verify → publish pipeline for one workflow.
@@ -254,8 +304,28 @@ run_pipeline() {
 	local version=""
 	local image_name=""
 
-	# ---- Skip build if --source-version was provided ----
-	if [[ -n "$SOURCE_VERSION" ]]; then
+	# ---- Skip build if --source-version or --source-results was provided ----
+	if [[ -n "$SOURCE_RESULTS_DIR" ]]; then
+		local result_file="$SOURCE_RESULTS_DIR/${name}.result"
+		if [[ ! -f "$result_file" ]]; then
+			echo "[$name] ERROR: no result file at $result_file"
+			_write_result "$name" \
+				"BUILD_STATUS=FAIL" \
+				"BUILD_ATTEMPTS=0" \
+				"BUILD_REASON=result-file-not-found"
+			return
+		fi
+		version=$(_get_field "$result_file" BUILD_VERSION)
+		if [[ -z "$version" ]]; then
+			echo "[$name] ERROR: no BUILD_VERSION in $result_file"
+			_write_result "$name" \
+				"BUILD_STATUS=FAIL" \
+				"BUILD_ATTEMPTS=0" \
+				"BUILD_REASON=version-not-in-result-file"
+			return
+		fi
+		echo "[$name] Skipping build (--source-results version=$version)."
+	elif [[ -n "$SOURCE_VERSION" ]]; then
 		version="$SOURCE_VERSION"
 		echo "[$name] Skipping build (--source-version=$version)."
 	else
@@ -371,12 +441,12 @@ run_pipeline() {
 			((attempt++)) || true
 		done
 
-	fi # end --source-version skip
+	fi # end --source-version / --source-results skip
 
 	# ---- Skip publish if --skip-publish was provided ----
 	if $SKIP_PUBLISH; then
 		local build_status_label
-		if [[ -n "$SOURCE_VERSION" ]]; then
+		if [[ -n "$SOURCE_VERSION" || -n "$SOURCE_RESULTS_DIR" ]]; then
 			build_status_label="SKIPPED"
 		else
 			build_status_label="PASS"
@@ -430,7 +500,7 @@ run_pipeline() {
 	# ---- Publish retry loop ----
 	# Build succeeded (or skipped) — only the publish is retried if it fails.
 	local build_status_label
-	if [[ -n "$SOURCE_VERSION" ]]; then
+	if [[ -n "$SOURCE_VERSION" || -n "$SOURCE_RESULTS_DIR" ]]; then
 		build_status_label="SKIPPED"
 	else
 		build_status_label="PASS"
