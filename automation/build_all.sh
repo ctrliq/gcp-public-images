@@ -220,7 +220,7 @@ if $DRY_RUN; then
 		if $SKIP_PUBLISH; then
 			printf "    [publish] SKIPPED (--skip-publish)\n\n"
 		else
-			printf '    [publish] podman run %s \\\n' "${PUBLISH_CREDS[*]}"
+			printf '    [publish] podman run --pull=newer %s \\\n' "${PUBLISH_CREDS[*]}"
 			printf '                -v %s:/workflows:z \\\n' "$local_wf_dir"
 			printf '                gcr.io/compute-image-tools/gce_image_publish:latest \\\n'
 			printf '                -source_gcs_path gs://gce-ciq-images-prod-artifacts \\\n'
@@ -511,7 +511,7 @@ run_pipeline() {
 		local pub_log="$LOG_DIR/${name}.publish.attempt${pub_attempt}.log"
 		echo "[$name] Publish attempt $pub_attempt (version=$version)..."
 
-		if podman run \
+		if podman run --pull=newer \
 			"${PUBLISH_CREDS[@]}" \
 			-v "${wf_dir}:/workflows:z" \
 			gcr.io/compute-image-tools/gce_image_publish:latest \

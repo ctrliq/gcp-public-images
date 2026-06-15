@@ -233,7 +233,7 @@ MOCK
     run bash "$SCRIPT" --versions 8 --environment prod
 
     [ "$status" -ne 0 ]
-    [[ "$output" == *"--source-version is required when --environment=prod"* ]]
+    [[ "$output" == *"--source-version or --source-results is required when --environment=prod"* ]]
 }
 
 @test "--environment prod rejects --if-image-exists=delete" {
