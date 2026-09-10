@@ -243,6 +243,18 @@ if $DRY_RUN; then
 fi
 
 # ---------------------------------------------------------------------------
+# Preflight: verify gcloud can reach GCS before spending an hour on builds.
+# An expired credential would otherwise surface mid-pipeline as bogus
+# per-workflow build failures (see serial-log-fetch-failed below).
+# ---------------------------------------------------------------------------
+if ! preflight_err=$(gcloud storage ls gs://gce-ciq-images-prod-artifacts 2>&1 >/dev/null); then
+	echo "ERROR: preflight failed — gcloud cannot access gs://gce-ciq-images-prod-artifacts:" >&2
+	echo "$preflight_err" | head -3 >&2
+	echo "Fix gcloud credentials (e.g. 'gcloud auth login') and re-run." >&2
+	exit 1
+fi
+
+# ---------------------------------------------------------------------------
 # Production confirmation prompt.
 # ---------------------------------------------------------------------------
 if [[ "$ENVIRONMENT" == "prod" ]]; then
@@ -373,22 +385,34 @@ run_pipeline() {
 			fi
 
 			local gcs_serial="gs://${serial_url#https://storage.cloud.google.com/}"
-			local gcs_log_dir
-			gcs_log_dir="$(dirname "$gcs_serial")"
-			local gcs_daisy_log="${gcs_log_dir}/daisy.log"
+
+			# Fetch the kickstart serial log. A fetch failure (expired
+			# credentials, missing object, network) is an infrastructure
+			# error, not a build failure: fail immediately with the gcloud
+			# error instead of retrying the build or deleting the tarball.
+			local serial_log="$LOG_DIR/${name}.attempt${attempt}.serial-port1.log"
+			if ! gcloud storage cat "$gcs_serial" >"$serial_log" 2>"${serial_log}.err"; then
+				echo "[$name] ERROR: could not fetch serial log $gcs_serial"
+				echo "[$name] gcloud: $(head -1 "${serial_log}.err")"
+				echo "[$name] Full gcloud error: ${serial_log}.err"
+				_write_result "$name" \
+					"BUILD_STATUS=FAIL" \
+					"BUILD_ATTEMPTS=$attempt" \
+					"BUILD_REASON=serial-log-fetch-failed"
+				return
+			fi
 
 			# Check kickstart serial log for success.
-			if gcloud storage cat "$gcs_serial" 2>/dev/null | grep -q "Installation complete"; then
+			if grep -q "Installation complete" "$serial_log"; then
 				echo "[$name] Attempt $attempt: installation complete."
 				echo "[$name] Serial log: $serial_url"
 
-				# Extract image name and version from daisy.log.
+				# Extract image name and version from the local daisy log.
 				# Expected line: CreateImages: Creating image "rocky-linux-9-v1774034849"
-				image_name=$(gcloud storage cat "$gcs_daisy_log" 2>/dev/null |
-					grep -oP 'Creating image "\K[^"]+' | tail -1 || true)
+				image_name=$(grep -oP 'Creating image "\K[^"]+' "$daisy_log" | tail -1 || true)
 
 				if [[ -z "$image_name" ]]; then
-					echo "[$name] ERROR: could not extract image name from $gcs_daisy_log"
+					echo "[$name] ERROR: could not extract image name from $daisy_log"
 					_write_result "$name" \
 						"BUILD_STATUS=FAIL" \
 						"BUILD_ATTEMPTS=$attempt" \
@@ -414,19 +438,19 @@ run_pipeline() {
 			# Installation did not complete — delete the failed tarball and retry.
 			echo "[$name] Attempt $attempt: 'Installation complete' not found in serial log ($gcs_serial)."
 
-			image_name=$(gcloud storage cat "$gcs_daisy_log" 2>/dev/null |
-				grep -oP 'Creating image "\K[^"]+' | tail -1 || true)
+			image_name=$(grep -oP 'Creating image "\K[^"]+' "$daisy_log" | tail -1 || true)
 
 			if [[ -n "$image_name" ]]; then
 				local tarball="gs://gce-ciq-images-prod-artifacts/${image_name}.tar.gz"
 				echo "[$name] Deleting failed tarball: $tarball"
-				if gcloud storage rm "$tarball" --project=gce-ciq-images 2>/dev/null; then
+				local rm_err
+				if rm_err=$(gcloud storage rm "$tarball" --project=gce-ciq-images 2>&1); then
 					echo "[$name] Tarball deleted."
 				else
-					echo "[$name] WARN: tarball deletion failed or object did not exist; continuing."
+					echo "[$name] WARN: tarball deletion failed ($(echo "$rm_err" | head -1)); continuing."
 				fi
 			else
-				echo "[$name] WARN: could not determine tarball path from $gcs_daisy_log — nothing deleted."
+				echo "[$name] WARN: could not determine tarball path from $daisy_log — nothing deleted."
 			fi
 
 			if [[ $attempt -gt $MAX_RETRIES ]]; then
