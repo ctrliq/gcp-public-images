@@ -18,6 +18,8 @@
 Parameters (retrieved from instance metadata):
 el_release: The EL release to build.
 el_savelogs: true to ask Anaconda to save logs (for debugging).
+google_cloud_repo: The Google Cloud repository track to pull guest packages
+              from. One of global, stable, staging, or unstable.
 """
 
 import difflib
@@ -32,12 +34,25 @@ def main():
   # Get Parameters
   release = utils.GetMetadataAttribute('el_release', raise_on_not_found=True)
   savelogs = utils.GetMetadataAttribute('el_savelogs') == 'true'
+  google_cloud_repo = utils.GetMetadataAttribute(
+      'google_cloud_repo', default_value='global').lower()
+  if google_cloud_repo not in (
+      'global',
+      'stable',
+      'staging',
+      'unstable',
+  ):
+    raise Exception(
+        'invalid image build config: google_cloud_repo must be one of '
+        'global, stable, staging, unstable'
+    )
 
   logging.info('EL Release: %s' % release)
   logging.info('Build working directory: %s' % os.getcwd())
 
   iso_file = '/files/installer.iso'
   ks_cfg = '/files/ks.cfg'
+  kickstart_vars_file = '/files/kickstart_vars.cfg'
 
   utils.AptGetInstall(['rsync'])
 
@@ -77,10 +92,17 @@ def main():
   utils.Execute(['mount', '-o', 'ro,loop', '-t', 'iso9660', iso_file, 'iso'])
   utils.Execute(['mount', '-t', 'vfat', installer_disk1, 'boot'])
   utils.Execute(['mount', '-t', 'ext4', installer_disk2, 'installer'])
+
+  logging.info('Writing Kickstart variables file to installer disk.')
+  with open(kickstart_vars_file, 'w') as f:
+    f.write(f'GOOGLE_CLOUD_REPO={google_cloud_repo}\n')
+  logging.info(f'Successfully wrote {kickstart_vars_file}')
+
   utils.Execute(['cp', '-r', 'iso/EFI', 'boot/'])
   utils.Execute(['cp', '-r', 'iso/images', 'boot/'])
   utils.Execute(['cp', iso_file, 'installer/'])
   utils.Execute(['cp', ks_cfg, 'installer/'])
+  utils.Execute(['cp', kickstart_vars_file, 'installer/'])
 
   # The kickstart config contains a preinstall script copying, reloading, and
   # triggering this rule in the install environment. This allows us to use
