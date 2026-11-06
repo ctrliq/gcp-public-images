@@ -11,12 +11,13 @@
 # Usage:
 #   ./automation/build_all.sh [--dry-run] [--versions 8,9,10] [--retries N] [--source-version VERSION] [--source-results DIR] [--skip-publish] [--environment test|prod]
 #
-# GOOGLE_APPLICATION_CREDENTIALS must be set in the environment before calling
-# this script (used by daisy). Publishing uses the local gcloud config dir.
+# See automation/README.md for ADC/WIF mounts, host gcloud configuration,
+# result schema, verification guarantees, and cancellation/cleanup limits.
 
 set -euo pipefail
 
 START_SECONDS=$SECONDS
+DATA_HELPER="$(cd "$(dirname "$0")" && pwd)/build_all_data.py"
 
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 WORKFLOW_ROOT="$REPO_ROOT/daisy"
@@ -25,17 +26,22 @@ VERSIONS=(8 9 10)
 WORKFLOWS=() # if non-empty, only these workflow names are run
 DRY_RUN=false
 MAX_RETRIES=1
-IF_IMAGE_EXISTS=fail # fail | skip | delete
-SOURCE_VERSION=""    # if set, skip build and publish this version directly
+IF_IMAGE_EXISTS=fail  # fail | skip | delete
+SOURCE_VERSION=""     # if set, skip build and publish this version directly
 SOURCE_RESULTS_DIR="" # if set, read per-workflow BUILD_VERSION from .result files
-SKIP_PUBLISH=false   # if true, build only — do not publish
-ENVIRONMENT=test     # test | prod
+SKIP_PUBLISH=false    # if true, build only — do not publish
+ENVIRONMENT="test"    # test | prod
+YES=false
+PUBLISH_VERSION="v$(date -u +%Y%m%d)"
 
-# GCP project per target environment.
-declare -A ENV_PROJECT=(
-	[test]="gce-ciq-images"
-	[prod]="rocky-linux-cloud"
-)
+error() {
+	echo "ERROR: $*" >&2
+	exit 1
+}
+usage() {
+	echo "Usage: $0 [--dry-run] [--versions 8,9,10] [--workflows name1,name2] [--retries N] [--if-image-exists fail|skip|delete] [--source-version vDIGITS | --source-results DIR] [--skip-publish] [--environment test|prod] [--yes]"
+}
+
 
 # Zone to use per Rocky major version.
 declare -A VERSION_ZONE=(
@@ -44,14 +50,8 @@ declare -A VERSION_ZONE=(
 	[10]="asia-southeast1-b"
 )
 
-# Credential mount args for gce_image_publish (Option B — gcloud config dir).
-# To switch to Option A (service account key file), replace with:
-#   PUBLISH_CREDS=(-v "$GOOGLE_APPLICATION_CREDENTIALS:/creds/key.json:ro,z"
-#                  -e "GOOGLE_APPLICATION_CREDENTIALS=/creds/key.json")
-PUBLISH_CREDS=(
-	-v "${HOME}/.config/gcloud/:/creds:z"
-	-e "GOOGLE_APPLICATION_CREDENTIALS=/creds/application_default_credentials.json"
-)
+# Populated only after dry-run and production approval; never logged.
+PUBLISH_CREDS=()
 
 for version in "${!VERSION_ZONE[@]}"; do
 	zone="${VERSION_ZONE[$version]}"
@@ -64,19 +64,40 @@ done
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--versions | --retries | --workflows | --if-image-exists | --source-version | --source-results | --environment)
+		[[ $# -ge 2 && -n "$2" && "$2" != --* ]] || error "$1 requires a value"
+		;;
+	esac
+	case "$1" in
+	--help | -h)
+		usage
+		exit 0
+		;;
+	--yes)
+		YES=true
+		shift
+		;;
 	--dry-run)
 		DRY_RUN=true
 		shift
 		;;
 	--versions)
+		[[ "$2" =~ ^(8|9|10)(,(8|9|10))*$ ]] || error "--versions must select 8,9,10"
 		IFS=',' read -ra VERSIONS <<<"$2"
+		declare -A seen_versions=()
+		for v in "${VERSIONS[@]}"; do
+			[[ ! -v seen_versions[$v] ]] || error "duplicate version: $v"
+			seen_versions[$v]=1
+		done
 		shift 2
 		;;
 	--retries)
-		MAX_RETRIES="$2"
+		[[ "$2" =~ ^[0-9]{1,6}$ ]] || error "--retries must be a nonnegative integer (0..999999)"
+		MAX_RETRIES=$((10#$2))
 		shift 2
 		;;
 	--workflows)
+		[[ "$2" =~ ^[a-zA-Z0-9_-]+(,[a-zA-Z0-9_-]+)*$ ]] || error "invalid --workflows selection"
 		IFS=',' read -ra WORKFLOWS <<<"$2"
 		shift 2
 		;;
@@ -89,6 +110,7 @@ while [[ $# -gt 0 ]]; do
 		shift 2
 		;;
 	--source-version)
+		[[ "$2" =~ ^v[0-9]+$ ]] || error "--source-version must match v[0-9]+"
 		SOURCE_VERSION="$2"
 		shift 2
 		;;
@@ -109,7 +131,8 @@ while [[ $# -gt 0 ]]; do
 		shift 2
 		;;
 	*)
-		echo "Usage: $0 [--dry-run] [--versions 8,9,10] [--workflows name1,name2] [--retries N] [--if-image-exists fail|skip|delete] [--source-version VERSION] [--source-results DIR] [--skip-publish] [--environment test|prod]"
+		echo "ERROR: unknown option $1" >&2
+		usage
 		exit 1
 		;;
 	esac
@@ -125,6 +148,10 @@ fi
 if [[ -n "$SOURCE_RESULTS_DIR" && ! -d "$SOURCE_RESULTS_DIR" ]]; then
 	echo "ERROR: --source-results directory does not exist: $SOURCE_RESULTS_DIR" >&2
 	exit 1
+fi
+
+if $SKIP_PUBLISH && [[ -n "$SOURCE_VERSION" || -n "$SOURCE_RESULTS_DIR" ]]; then
+	error "source selection with --skip-publish is a no-op"
 fi
 
 # ---------------------------------------------------------------------------
@@ -159,7 +186,8 @@ for version in "${VERSIONS[@]}"; do
 		continue
 	fi
 	zone="${VERSION_ZONE[$version]}"
-	for wf in "$wf_dir"/*wf.json; do
+	for wf in "$wf_dir"/*.wf.json; do
+		[[ -f "$wf" ]] || continue
 		name="$(basename "$wf" .wf.json)"
 		if [[ ${#WORKFLOWS[@]} -gt 0 ]]; then
 			local_match=false
@@ -175,25 +203,30 @@ for version in "${VERSIONS[@]}"; do
 	done
 done
 
+[[ ${#all_names[@]} -gt 0 ]] || error "no workflows selected"
+for requested in "${WORKFLOWS[@]}"; do
+	[[ -v wf_paths[$requested] ]] || error "workflow not found in selected versions: $requested"
+done
+
+# Resolve selected publisher metadata locally before approval or cloud access.
+command -v python3 >/dev/null || error "python3 is required for publisher metadata validation"
+declare -A wf_projects=()
+for name in "${all_names[@]}"; do
+	wf_projects[$name]=$(python3 "$DATA_HELPER" target-project "${wf_paths[$name]%.wf.json}.publish.json" "$ENVIRONMENT") || exit 1
+done
+
 # _get_field FILE KEY — extracts a single value from a result file.
 _get_field() {
 	grep -m1 "^${2}=" "$1" 2>/dev/null | cut -d= -f2- || true
 }
 
-# Validate that every selected workflow has a result file with a BUILD_VERSION.
+# Validate and snapshot source data before any cloud access (never source/eval).
+declare -A source_versions=()
 if [[ -n "$SOURCE_RESULTS_DIR" ]]; then
-	_missing=()
+	command -v python3 >/dev/null || error "python3 is required for --source-results"
 	for name in "${all_names[@]}"; do
-		rf="$SOURCE_RESULTS_DIR/${name}.result"
-		if [[ ! -f "$rf" ]] || [[ -z $(_get_field "$rf" BUILD_VERSION) ]]; then
-			_missing+=("$name")
-		fi
+		source_versions[$name]=$(python3 "$DATA_HELPER" source "$SOURCE_RESULTS_DIR/$name.result") || exit 1
 	done
-	if [[ ${#_missing[@]} -gt 0 ]]; then
-		echo "ERROR: --source-results is missing BUILD_VERSION for:" >&2
-		printf '  %s\n' "${_missing[@]}" >&2
-		exit 1
-	fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -208,8 +241,9 @@ if $DRY_RUN; then
 		local_publish_json="${local_wf_file%.wf.json}.publish.json"
 		printf "  [%s]\n" "$name"
 		printf "    [dir]     %s\n" "$local_wf_dir"
+		printf "    [target]  %s\n" "${wf_projects[$name]}"
 		if [[ -n "$SOURCE_RESULTS_DIR" ]]; then
-			local_result_version=$(_get_field "$SOURCE_RESULTS_DIR/${name}.result" BUILD_VERSION)
+			local_result_version=${source_versions[$name]}
 			printf "    [build]   SKIPPED (--source-results version=%s)\n" "${local_result_version:-MISSING}"
 		elif [[ -n "$SOURCE_VERSION" ]]; then
 			printf "    [build]   SKIPPED (--source-version=%s)\n" "$SOURCE_VERSION"
@@ -220,27 +254,79 @@ if $DRY_RUN; then
 		if $SKIP_PUBLISH; then
 			printf "    [publish] SKIPPED (--skip-publish)\n\n"
 		else
-			printf '    [publish] podman run --pull=newer %s \\\n' "${PUBLISH_CREDS[*]}"
+			printf '    [publish] podman run --pull=newer %s \\\n' "[read-only ADC and dependency mounts; redacted]"
 			printf '                -v %s:/workflows:z \\\n' "$local_wf_dir"
 			printf '                gcr.io/compute-image-tools/gce_image_publish:latest \\\n'
 			printf '                -source_gcs_path gs://gce-ciq-images-prod-artifacts \\\n'
 			if [[ -n "$SOURCE_RESULTS_DIR" ]]; then
-				local_version_display=$(_get_field "$SOURCE_RESULTS_DIR/${name}.result" BUILD_VERSION)
+				local_version_display=${source_versions[$name]}
 				local_version_display="${local_version_display:-MISSING}"
 			else
 				local_version_display="${SOURCE_VERSION:-<version>}"
 			fi
 			printf '                -source_version %s -no_root -skip_confirmation \\\n' "$local_version_display"
 			if [[ "$ENVIRONMENT" == "test" ]]; then
-				printf '                -date_version -var:environment=test -rollout_rate 0 \\\n'
+				printf '                -publish_version %s -var:environment=test -rollout_rate 0 \\\n' "$PUBLISH_VERSION"
 			else
-				printf '                -date_version -var:environment=%s \\\n' "$ENVIRONMENT"
+				printf '                -publish_version %s -var:environment=%s \\\n' "$PUBLISH_VERSION" "$ENVIRONMENT"
 			fi
 			printf '                /workflows/%s\n\n' "$local_publish_json"
 		fi
 	done
 	exit 0
 fi
+
+[[ ! -e "$LOG_DIR/results" ]] || error "result directory already exists; choose a fresh LOG_DIR"
+
+# ---------------------------------------------------------------------------
+# Production confirmation prompt.
+# ---------------------------------------------------------------------------
+if [[ "$ENVIRONMENT" == "prod" ]] && ! $YES; then
+	[[ -t 0 ]] || error "noninteractive production requires --yes"
+	echo ""
+	echo "=== PRODUCTION PUBLISH ==="
+	echo "  Environment:    prod (target projects resolved per workflow)"
+	if [[ -n "$SOURCE_RESULTS_DIR" ]]; then
+		echo "  Source:         --source-results $SOURCE_RESULTS_DIR"
+	else
+		echo "  Source version: $SOURCE_VERSION"
+	fi
+	echo "  Workflows:      ${#all_names[@]}"
+	for name in "${all_names[@]}"; do
+		if [[ -n "$SOURCE_RESULTS_DIR" ]]; then
+			local_ver=${source_versions[$name]}
+			printf '    - %s  target=%s  source=%s  publish=%s\n' "$name" "${wf_projects[$name]}" "$local_ver" "$PUBLISH_VERSION"
+		else
+			printf '    - %s  target=%s  source=%s  publish=%s\n' "$name" "${wf_projects[$name]}" "$SOURCE_VERSION" "$PUBLISH_VERSION"
+		fi
+	done
+	echo ""
+	read -r -p "Proceed with production publish? [y/N] " confirm
+	if [[ "$confirm" != [yY] ]]; then
+		echo "Aborted."
+		exit 1
+	fi
+fi
+
+# Operation-aware dependencies. Dry-run/help need no cloud tools or credentials.
+required=(gcloud python3)
+[[ -n "$SOURCE_VERSION" || -n "$SOURCE_RESULTS_DIR" ]] || required+=(daisy)
+$SKIP_PUBLISH || required+=(podman)
+for tool in "${required[@]}"; do
+	command -v "$tool" >/dev/null || error "required command not found: $tool"
+done
+credential_paths=$(python3 "$DATA_HELPER" credentials) || exit 1
+mapfile -t credential_files <<<"$credential_paths"
+if ! $SKIP_PUBLISH; then
+	for credential_file in "${credential_files[@]}"; do
+		PUBLISH_CREDS+=(-v "$credential_file:$credential_file:ro,z")
+	done
+	PUBLISH_CREDS+=(-e "GOOGLE_APPLICATION_CREDENTIALS=${credential_files[0]}")
+fi
+export GOOGLE_APPLICATION_CREDENTIALS="${credential_files[0]}"
+unset credential_paths credential_files credential_file
+# Keep a private in-memory snapshot, not a credential-bearing artifact file.
+REDACTION_RULES=$(python3 "$DATA_HELPER" redaction-rules) || exit 1
 
 # ---------------------------------------------------------------------------
 # Preflight: verify gcloud can reach GCS before spending an hour on builds.
@@ -254,47 +340,43 @@ if ! preflight_err=$(gcloud storage ls gs://gce-ciq-images-prod-artifacts 2>&1 >
 	exit 1
 fi
 
-# ---------------------------------------------------------------------------
-# Production confirmation prompt.
-# ---------------------------------------------------------------------------
-if [[ "$ENVIRONMENT" == "prod" ]]; then
-	echo ""
-	echo "=== PRODUCTION PUBLISH ==="
-	echo "  Environment:    prod (target project: ${ENV_PROJECT[prod]})"
-	if [[ -n "$SOURCE_RESULTS_DIR" ]]; then
-		echo "  Source:         --source-results $SOURCE_RESULTS_DIR"
-	else
-		echo "  Source version: $SOURCE_VERSION"
-	fi
-	echo "  Workflows:      ${#all_names[@]}"
-	for name in "${all_names[@]}"; do
-		if [[ -n "$SOURCE_RESULTS_DIR" ]]; then
-			local_ver=$(_get_field "$SOURCE_RESULTS_DIR/${name}.result" BUILD_VERSION)
-			printf '    - %-55s  %s\n' "$name" "${local_ver:-MISSING}"
-		else
-			printf '    - %s\n' "$name"
-		fi
-	done
-	echo ""
-	read -r -p "Proceed with production publish? [y/N] " confirm
-	if [[ "$confirm" != [yY] ]]; then
-		echo "Aborted."
-		exit 1
-	fi
-fi
-
 mkdir -p "$LOG_DIR"
 RESULT_DIR="$LOG_DIR/results"
-mkdir -p "$RESULT_DIR"
+mkdir "$RESULT_DIR" || error "result directory already exists; choose a fresh LOG_DIR"
 
 # ---------------------------------------------------------------------------
 # _write_result NAME KEY=VALUE [KEY=VALUE ...]
 #   Writes structured result fields to $RESULT_DIR/<name>.result.
 # ---------------------------------------------------------------------------
 _write_result() {
-	local name="$1"
+	local name="$1" key value pair tmp
 	shift
-	printf '%s\n' "$@" >"$RESULT_DIR/${name}.result"
+	local -A fields=(
+		[BUILD_STATUS]=RUNNING [BUILD_ATTEMPTS]=0 [BUILD_REASON]="" [BUILD_VERSION]=""
+		[PUBLISH_STATUS]=NOT_ATTEMPTED [PUBLISH_ATTEMPTS]=0 [PUBLISH_REASON]=""
+		[PUBLISHED_IMAGES]="[]" [SOURCE_TARBALL]="" [WORKER_EXIT_STATUS]=0
+		[TARGET_PROJECT]="${wf_projects[$name]}"
+	)
+	if [[ -f "$RESULT_DIR/$name.result" ]]; then
+		while IFS='=' read -r key value; do fields[$key]="$value"; done <"$RESULT_DIR/$name.result"
+	fi
+	for pair in "$@"; do fields[${pair%%=*}]="${pair#*=}"; done
+	tmp="$RESULT_DIR/.$name.$BASHPID.tmp"
+	for key in BUILD_STATUS BUILD_ATTEMPTS BUILD_REASON BUILD_VERSION PUBLISH_STATUS PUBLISH_ATTEMPTS PUBLISH_REASON PUBLISHED_IMAGES SOURCE_TARBALL WORKER_EXIT_STATUS TARGET_PROJECT; do
+		printf '%s=%s\n' "$key" "${fields[$key]}"
+	done >"$tmp"
+	mv -f "$tmp" "$RESULT_DIR/$name.result"
+}
+
+_finish_result() {
+	local name="$1" reason="$2" state="${3:-FAIL}" build pub
+	build=$(_get_field "$RESULT_DIR/$name.result" BUILD_STATUS)
+	pub=$(_get_field "$RESULT_DIR/$name.result" PUBLISH_STATUS)
+	if [[ "$build" == RUNNING || -z "$build" ]]; then
+		_write_result "$name" "BUILD_STATUS=$state" "BUILD_REASON=$reason"
+	elif [[ "$pub" == RUNNING ]]; then
+		_write_result "$name" "PUBLISH_STATUS=$state" "PUBLISH_REASON=$reason"
+	fi
 }
 
 # ---------------------------------------------------------------------------
@@ -307,51 +389,39 @@ _write_result() {
 # ---------------------------------------------------------------------------
 run_pipeline() {
 	local name="$1"
+	local target_project="${wf_projects[$name]}"
 	local wf_dir="${wf_dirs[$name]}"
 	local wf_file
 	wf_file="$(basename "${wf_paths[$name]}")"
 	local zone="${wf_zones[$name]}"
 	local publish_json="${wf_file%.wf.json}.publish.json"
-	local attempt=1
+	local attempt=0
 	local version=""
 	local image_name=""
 
 	# ---- Skip build if --source-version or --source-results was provided ----
 	if [[ -n "$SOURCE_RESULTS_DIR" ]]; then
-		local result_file="$SOURCE_RESULTS_DIR/${name}.result"
-		if [[ ! -f "$result_file" ]]; then
-			echo "[$name] ERROR: no result file at $result_file"
-			_write_result "$name" \
-				"BUILD_STATUS=FAIL" \
-				"BUILD_ATTEMPTS=0" \
-				"BUILD_REASON=result-file-not-found"
-			return
-		fi
-		version=$(_get_field "$result_file" BUILD_VERSION)
-		if [[ -z "$version" ]]; then
-			echo "[$name] ERROR: no BUILD_VERSION in $result_file"
-			_write_result "$name" \
-				"BUILD_STATUS=FAIL" \
-				"BUILD_ATTEMPTS=0" \
-				"BUILD_REASON=version-not-in-result-file"
-			return
-		fi
+		version="${source_versions[$name]}"
 		echo "[$name] Skipping build (--source-results version=$version)."
 	elif [[ -n "$SOURCE_VERSION" ]]; then
 		version="$SOURCE_VERSION"
 		echo "[$name] Skipping build (--source-version=$version)."
 	else
 
+		attempt=1
 		# ---- Build + kickstart verification retry loop ----
 		while true; do
+			_write_result "$name" "BUILD_ATTEMPTS=$attempt"
 			local daisy_log="$LOG_DIR/${name}.attempt${attempt}.daisy.log"
 			echo "[$name] Build attempt $attempt starting..."
 
 			# Run daisy from the workflow's publish directory.
-			if ! (cd "$wf_dir" && daisy \
+			if (cd "$wf_dir" && exec daisy \
 				-zone "$zone" \
 				-var:workflow_root="$WORKFLOW_ROOT" \
 				"$wf_file") >"$daisy_log" 2>&1; then
+				:
+			else
 				local daisy_exit=$?
 				echo "[$name] Attempt $attempt: daisy exited $daisy_exit. Log: $daisy_log"
 				if [[ $attempt -gt $MAX_RETRIES ]]; then
@@ -443,11 +513,17 @@ run_pipeline() {
 			if [[ -n "$image_name" ]]; then
 				local tarball="gs://gce-ciq-images-prod-artifacts/${image_name}.tar.gz"
 				echo "[$name] Deleting failed tarball: $tarball"
-				local rm_err
-				if rm_err=$(gcloud storage rm "$tarball" --project=gce-ciq-images 2>&1); then
-					echo "[$name] Tarball deleted."
+				if gcloud storage rm "$tarball" --project=gce-ciq-images >"$LOG_DIR/$name.tarball-delete.log" 2>&1; then
+					local deletion_check="$LOG_DIR/$name.tarball-delete-check.log"
+					if gcloud storage ls "$tarball" >"$deletion_check" 2>&1 ||
+						! grep -Fq 'matched no objects' "$deletion_check"; then
+						_write_result "$name" "BUILD_STATUS=FAIL" "BUILD_ATTEMPTS=$attempt" "BUILD_REASON=tarball-delete-verification-failed"
+						return
+					fi
+					echo "[$name] Tarball deletion verified."
 				else
-					echo "[$name] WARN: tarball deletion failed ($(echo "$rm_err" | head -1)); continuing."
+					_write_result "$name" "BUILD_STATUS=FAIL" "BUILD_ATTEMPTS=$attempt" "BUILD_REASON=tarball-delete-failed"
+					return
 				fi
 			else
 				echo "[$name] WARN: could not determine tarball path from $daisy_log — nothing deleted."
@@ -467,6 +543,13 @@ run_pipeline() {
 
 	fi # end --source-version / --source-results skip
 
+	local completed_build=PASS
+	[[ -z "$SOURCE_VERSION" && -z "$SOURCE_RESULTS_DIR" ]] || completed_build=SKIPPED
+	local source_tarball source_prefix
+	source_prefix=$(grep -oP '"Prefix":\s*"\K[^"]+' "$wf_dir/$publish_json" | head -1 || true)
+	source_tarball="gs://gce-ciq-images-prod-artifacts/${image_name:-${source_prefix}-${version}}.tar.gz"
+	_write_result "$name" "BUILD_STATUS=$completed_build" "BUILD_ATTEMPTS=$attempt" "BUILD_VERSION=$version" "SOURCE_TARBALL=$source_tarball"
+
 	# ---- Skip publish if --skip-publish was provided ----
 	if $SKIP_PUBLISH; then
 		local build_status_label
@@ -485,53 +568,45 @@ run_pipeline() {
 		return
 	fi
 
-	# ---- Pre-publish: handle existing image if requested ----
-	if [[ "$IF_IMAGE_EXISTS" != "fail" ]]; then
-		local image_prefix today published_image
-		image_prefix=$(grep -oP '"Prefix":\s*"\K[^"]+' "$wf_dir/$publish_json" | head -1 || true)
+	_write_result "$name" "PUBLISH_STATUS=RUNNING"
 
-		if [[ -n "$image_prefix" ]]; then
-			today=$(date +%Y%m%d)
-			published_image="${image_prefix}-v${today}"
-
-			if gcloud compute images describe "$published_image" \
-				--project=gce-ciq-images --quiet 2>/dev/null; then
-				echo "[$name] Image $published_image already exists in gce-ciq-images."
-
-				if [[ "$IF_IMAGE_EXISTS" == "skip" ]]; then
-					echo "[$name] Skipping publish (--if-image-exists=skip)."
-					_write_result "$name" \
-						"BUILD_STATUS=$build_status_label" \
-						"BUILD_ATTEMPTS=$attempt" \
-						"BUILD_VERSION=$version" \
-						"PUBLISH_STATUS=SKIPPED"
-					return
-				elif [[ "$IF_IMAGE_EXISTS" == "delete" ]]; then
-					echo "[$name] Deleting existing image (--if-image-exists=delete)..."
-					if gcloud compute images delete "$published_image" \
-						--project=gce-ciq-images --quiet 2>/dev/null; then
-						echo "[$name] Deleted $published_image. Proceeding with publish."
-					else
-						echo "[$name] WARN: failed to delete $published_image; publish may fail."
-					fi
-				fi
-			fi
-		else
-			echo "[$name] WARN: could not extract Prefix from $publish_json; skipping existence check."
-		fi
+	# ---- Pre-publish: target environment, fail closed on lookup/delete errors ----
+	local build_status_label=PASS
+	[[ -z "$SOURCE_VERSION" && -z "$SOURCE_RESULTS_DIR" ]] || build_status_label=SKIPPED
+	local image_prefix published_image lookup_err
+	image_prefix=$(grep -oP '"Prefix":\s*"\K[^"]+' "$wf_dir/$publish_json" | head -1 || true)
+	if [[ -z "$image_prefix" ]]; then
+		_write_result "$name" "BUILD_STATUS=$build_status_label" "BUILD_ATTEMPTS=$attempt" "BUILD_VERSION=$version" "PUBLISH_STATUS=FAIL" "PUBLISH_REASON=missing-image-prefix"
+		return
 	fi
-
-	# ---- Publish retry loop ----
-	# Build succeeded (or skipped) — only the publish is retried if it fails.
-	local build_status_label
-	if [[ -n "$SOURCE_VERSION" || -n "$SOURCE_RESULTS_DIR" ]]; then
-		build_status_label="SKIPPED"
-	else
-		build_status_label="PASS"
+	published_image="${image_prefix}-${PUBLISH_VERSION}"
+	lookup_err="$LOG_DIR/$name.image-lookup.err"
+	if gcloud compute images describe "$published_image" --project="${target_project}" --quiet >/dev/null 2>"$lookup_err"; then
+		if [[ "$IF_IMAGE_EXISTS" == "fail" ]]; then
+			_write_result "$name" "PUBLISH_STATUS=FAIL" "PUBLISH_REASON=image-already-exists"
+			return
+		fi
+		if [[ "$IF_IMAGE_EXISTS" == "skip" ]]; then
+			_write_result "$name" "BUILD_STATUS=$build_status_label" "BUILD_ATTEMPTS=$attempt" "BUILD_VERSION=$version" "PUBLISH_STATUS=SKIPPED" "PUBLISH_REASON=existing-image-unverified"
+			return
+		fi
+		if ! gcloud compute images delete "$published_image" --project="${target_project}" --quiet >"$LOG_DIR/$name.image-delete.log" 2>&1; then
+			_write_result "$name" "BUILD_STATUS=$build_status_label" "BUILD_ATTEMPTS=$attempt" "BUILD_VERSION=$version" "PUBLISH_STATUS=FAIL" "PUBLISH_REASON=image-delete-failed"
+			return
+		fi
+		if gcloud compute images describe "$published_image" --project="${target_project}" --quiet >/dev/null 2>"$lookup_err" ||
+			! grep -Fq "The resource 'projects/${target_project}/global/images/$published_image' was not found" "$lookup_err"; then
+			_write_result "$name" "PUBLISH_STATUS=FAIL" "PUBLISH_REASON=image-delete-verification-failed"
+			return
+		fi
+	elif ! grep -Fq "The resource 'projects/${target_project}/global/images/$published_image' was not found" "$lookup_err"; then
+		_write_result "$name" "BUILD_STATUS=$build_status_label" "BUILD_ATTEMPTS=$attempt" "BUILD_VERSION=$version" "PUBLISH_STATUS=FAIL" "PUBLISH_REASON=image-lookup-failed"
+		return
 	fi
 
 	local pub_attempt=1
 	while true; do
+		_write_result "$name" "PUBLISH_ATTEMPTS=$pub_attempt"
 		local pub_log="$LOG_DIR/${name}.publish.attempt${pub_attempt}.log"
 		echo "[$name] Publish attempt $pub_attempt (version=$version)..."
 
@@ -541,17 +616,19 @@ run_pipeline() {
 			gcr.io/compute-image-tools/gce_image_publish:latest \
 			-source_gcs_path gs://gce-ciq-images-prod-artifacts \
 			-source_version "$version" \
-			-no_root -skip_confirmation -date_version \
+			-no_root -skip_confirmation -publish_version "$PUBLISH_VERSION" \
 			-var:environment="$ENVIRONMENT" \
 			"${PUBLISH_EXTRA_ARGS[@]}" \
 			/workflows/"$publish_json" >"$pub_log" 2>&1; then
-			echo "[$name] Published successfully."
-			_write_result "$name" \
-				"BUILD_STATUS=$build_status_label" \
-				"BUILD_ATTEMPTS=$attempt" \
-				"BUILD_VERSION=$version" \
-				"PUBLISH_STATUS=PASS" \
-				"PUBLISH_ATTEMPTS=$pub_attempt"
+			local readback="$LOG_DIR/$name.publish.readback.json" verified
+			published_image="${image_prefix}-${PUBLISH_VERSION}"
+			if gcloud compute images describe "$published_image" --project="${target_project}" --format=json >"$readback" 2>"$LOG_DIR/$name.publish.readback.err" &&
+				verified=$(python3 "$DATA_HELPER" verify "$readback" "${target_project}" "$published_image" "$source_tarball"); then
+				_write_result "$name" "BUILD_STATUS=$build_status_label" "BUILD_ATTEMPTS=$attempt" "BUILD_VERSION=$version" "PUBLISH_STATUS=PASS" "PUBLISH_ATTEMPTS=$pub_attempt" "PUBLISHED_IMAGES=$verified"
+				return
+			fi
+			# Do not republish a possibly-created image on a readback failure.
+			_write_result "$name" "PUBLISH_STATUS=FAIL" "PUBLISH_ATTEMPTS=$pub_attempt" "PUBLISH_REASON=publish-verification-failed"
 			return
 		fi
 
@@ -577,18 +654,69 @@ run_pipeline() {
 # Launch all pipelines in parallel.
 # ---------------------------------------------------------------------------
 pids=()
+pid_names=()
+CANCELLED=false
+CANCEL_SIGNAL=""
+_cancel() {
+	CANCELLED=true
+	CANCEL_SIGNAL="$1"
+	trap '' INT TERM
+	local pid
+	# Job control gives each worker its own group. Children and grandchildren
+	# inherit that group; TERM then KILL also handles children ignoring TERM.
+	for pid in "${pids[@]}"; do kill -TERM -- "-$pid" 2>/dev/null || true; done
+	sleep 0.2
+	for pid in "${pids[@]}"; do kill -KILL -- "-$pid" 2>/dev/null || true; done
+}
+trap '_cancel INT' INT
+trap '_cancel TERM' TERM
+set -m
+# Initialize every selection so even an unlaunched/cancelled worker has a result.
+for name in "${all_names[@]}"; do _write_result "$name"; done
 echo "=== Launching ${#all_names[@]} workflow pipelines (logs=$LOG_DIR) ==="
 for name in "${all_names[@]}"; do
-	run_pipeline "$name" &
-	pids+=($!)
+	$CANCELLED && break
+	# Disable monitor mode inside workers, keeping subprocess trees together.
+	(
+		set +m
+		trap - INT TERM
+		run_pipeline "$name"
+	) &
+	pids+=("$!")
+	pid_names+=("$name")
+	# A signal between fork and tracking is handled before any further launch.
+	if $CANCELLED; then
+		kill -KILL -- "-${pids[-1]}" 2>/dev/null || true
+		break
+	fi
 	echo "  + $name (PID $!)"
 done
 
-echo ""
-echo "=== Waiting for ${#pids[@]} pipelines ==="
-for pid in "${pids[@]}"; do
-	wait "$pid" || true
+for index in "${!pids[@]}"; do
+	pid="${pids[$index]}"
+	wait_status=0
+	wait "$pid" || wait_status=$?
+	# wait can return early when interrupted; reap the tracked worker as well.
+	if $CANCELLED; then wait "$pid" 2>/dev/null || wait_status=$?; fi
+	if ! $CANCELLED; then
+		if [[ $wait_status -ne 0 ]]; then
+			kill -TERM -- "-$pid" 2>/dev/null || true
+			sleep 0.2
+			kill -KILL -- "-$pid" 2>/dev/null || true
+		fi
+		_finish_result "${pid_names[$index]}" "worker-exited-$wait_status"
+	fi
+	_write_result "${pid_names[$index]}" "WORKER_EXIT_STATUS=$wait_status"
 done
+if $CANCELLED; then
+	for name in "${all_names[@]}"; do
+		_finish_result "$name" "cancelled-$CANCEL_SIGNAL" CANCELLED
+	done
+fi
+set +m
+redaction_failed=false
+python3 "$DATA_HELPER" redact "$LOG_DIR" <<<"$REDACTION_RULES" || redaction_failed=true
+unset REDACTION_RULES
 
 # ---------------------------------------------------------------------------
 # Final summary.
@@ -624,6 +752,7 @@ for name in $(printf '%s\n' "${all_names[@]}" | sort); do
 	pub_status=$(_get_field "$result_file" PUBLISH_STATUS)
 	pub_attempts=$(_get_field "$result_file" PUBLISH_ATTEMPTS)
 	pub_reason=$(_get_field "$result_file" PUBLISH_REASON)
+	worker_exit=$(_get_field "$result_file" WORKER_EXIT_STATUS)
 
 	if [[ "$build_status" == "PASS" ]]; then
 		build_col="PASS (${build_attempts} att)"
@@ -636,7 +765,7 @@ for name in $(printf '%s\n' "${all_names[@]}" | sort); do
 		((build_fail++)) || true
 	fi
 
-	if [[ -z "$pub_status" ]]; then
+	if [[ -z "$pub_status" || "$pub_status" == NOT_ATTEMPTED ]]; then
 		pub_col="- (build failed)"
 		((pub_skipped++)) || true
 	elif [[ "$pub_status" == "PASS" ]]; then
@@ -656,6 +785,10 @@ for name in $(printf '%s\n' "${all_names[@]}" | sort); do
 
 	printf '  %-55s  %-32s  %s\n' "$name" "$build_col" "$pub_col"
 
+	if [[ "$worker_exit" != 0 ]]; then
+		echo "  [$name] worker exited $worker_exit (completed stage results retained)" >&2
+		((overall_fail++)) || true
+	fi
 	if [[ "$build_status" != "PASS" && "$build_status" != "SKIPPED" || ("$pub_status" != "PASS" && "$pub_status" != "SKIPPED") ]]; then
 		((overall_fail++)) || true
 	fi
@@ -670,4 +803,20 @@ echo "Logs: $LOG_DIR"
 elapsed=$((SECONDS - START_SECONDS))
 printf '  Total time: %dm %02ds\n' $((elapsed / 60)) $((elapsed % 60))
 
+source_mode=build
+[[ -z "$SOURCE_VERSION" ]] || source_mode=version
+[[ -z "$SOURCE_RESULTS_DIR" ]] || source_mode=results
+repo_commit=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)
+versions_csv=$(
+	IFS=,
+	echo "${VERSIONS[*]}"
+)
+python3 "$DATA_HELPER" summary "$LOG_DIR" "$ENVIRONMENT" \
+	"$MAX_RETRIES" "$SKIP_PUBLISH" "$IF_IMAGE_EXISTS" "$PUBLISH_VERSION" "$repo_commit" \
+	"$source_mode" "$SOURCE_VERSION" "$versions_csv" "$YES" "${CANCELLED:-false}" "${all_names[@]}"
+if $CANCELLED; then
+	[[ "$CANCEL_SIGNAL" == INT ]] && exit 130
+	exit 143
+fi
+$redaction_failed && error "artifact redaction failed; do not archive logs"
 [[ $overall_fail -eq 0 ]]
