@@ -61,7 +61,10 @@ Daisy and the publisher use the file specified by
 `GOOGLE_APPLICATION_CREDENTIALS`. When unset, the script selects
 `$CLOUDSDK_CONFIG/application_default_credentials.json` (or the same file under
 `$HOME/.config/gcloud`). The selected file must be readable and use an absolute
-path. Service-account and authorized-user ADC are supported. External-account
+path. Service-account and authorized-user ADC are supported. Build-only runs
+(`--skip-publish`) are the exception: they perform no credential snapshot at
+all, and Daisy authenticates through its own chain — e.g. the GCE metadata
+server when the script runs on a VM with a configured service account. External-account
 (WIF) ADC is supported for **file-based** `credential_source.file`: both the ADC
 and its subject-token file must exist at absolute paths. The publisher mounts
 these exact paths read-only, preserving references inside WIF configuration.

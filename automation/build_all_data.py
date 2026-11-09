@@ -97,12 +97,12 @@ def verify(path, project, name, tarball):
     if not isinstance(raw_disk, dict):
         raise ValueError("image readback rawDisk must contain a JSON object")
     raw_source = raw_disk.get("source")
-    if raw_source is not None and raw_source not in (
+    if raw_source not in (None, "") and raw_source not in (
             tarball, tarball.replace("gs://", "https://storage.googleapis.com/", 1)):
         raise ValueError("image readback source mismatch")
     return [{"selfLink": image["selfLink"], "id": str(image["id"]),
              "status": image["status"], "source": raw_source,
-             "source_verified": raw_source is not None}]
+             "source_verified": raw_source not in (None, "")}]
 
 
 def credentials():

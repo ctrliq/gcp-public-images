@@ -597,11 +597,23 @@ MOCK
 @test "missing credentials fail before cloud with no paths or contents" {
     unset GOOGLE_APPLICATION_CREDENTIALS
     export CLOUDSDK_CONFIG="$TEST_TMPDIR/absent"
-    run bash "$SCRIPT" --versions 8 --skip-publish
+    _mock_podman_pass
+    run bash "$SCRIPT" --versions 8 --source-version v123
     [ "$status" -ne 0 ]
     [[ "$output" == *'credentials'* ]]
     [[ "$output" != *"$CLOUDSDK_CONFIG"* ]]
     [ ! -e "$INVOCATION_LOG" ]
+}
+
+@test "build-only runs need no credentials and never touch the publisher" {
+    unset GOOGLE_APPLICATION_CREDENTIALS
+    export CLOUDSDK_CONFIG="$TEST_TMPDIR/absent"
+    _mock_daisy_pass
+    run bash "$SCRIPT" --versions 8 --skip-publish
+    [ "$status" -eq 0 ]
+    ! grep -q 'UNEXPECTED podman' "$INVOCATION_LOG"
+    [[ "$output" == *'PASS (1 att)'* ]]
+    [[ "$output" != *'gce_image_publish'* ]]
 }
 
 @test "JSON summary matches terminal results and safe effective options" {
@@ -911,6 +923,27 @@ with open(Path(tmp)/'output','w') as out:
         for pid in pids:
             try: os.kill(pid, signal.SIGKILL)
             except ProcessLookupError: pass
+PY
+}
+
+@test "readback accepts empty source without claiming source verification" {
+    python3 - "${SCRIPT%/*}/build_all_data.py" "$TEST_TMPDIR/readback.json" <<'PY'
+import importlib.util, json, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location('build_all_data', sys.argv[1])
+helper = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(helper)
+image = {
+    'name': 'image',
+    'selfLink': 'https://www.googleapis.com/compute/v1/projects/project/global/images/image',
+    'id': '1', 'status': 'READY',
+    'rawDisk': {'containerType': 'TAR', 'source': ''},
+}
+Path(sys.argv[2]).write_text(json.dumps(image))
+result = helper.verify(sys.argv[2], 'project', 'image', 'gs://bucket/image.tar.gz')[0]
+assert result['source'] == ''
+assert result['source_verified'] is False
+assert result['status'] == 'READY'
 PY
 }
 

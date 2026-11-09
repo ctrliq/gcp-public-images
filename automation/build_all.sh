@@ -315,18 +315,23 @@ $SKIP_PUBLISH || required+=(podman)
 for tool in "${required[@]}"; do
 	command -v "$tool" >/dev/null || error "required command not found: $tool"
 done
-credential_paths=$(python3 "$DATA_HELPER" credentials) || exit 1
-mapfile -t credential_files <<<"$credential_paths"
-if ! $SKIP_PUBLISH; then
+if $SKIP_PUBLISH; then
+	# Build-only runs mount no publisher credentials and produce no
+	# credential-bearing artifacts; daisy authenticates through its own
+	# chain (ADC file or the GCE metadata server when run on a VM).
+	REDACTION_RULES=""
+else
+	credential_paths=$(python3 "$DATA_HELPER" credentials) || exit 1
+	mapfile -t credential_files <<<"$credential_paths"
 	for credential_file in "${credential_files[@]}"; do
 		PUBLISH_CREDS+=(-v "$credential_file:$credential_file:ro,z")
 	done
 	PUBLISH_CREDS+=(-e "GOOGLE_APPLICATION_CREDENTIALS=${credential_files[0]}")
+	export GOOGLE_APPLICATION_CREDENTIALS="${credential_files[0]}"
+	unset credential_paths credential_files credential_file
+	# Keep a private in-memory snapshot, not a credential-bearing artifact file.
+	REDACTION_RULES=$(python3 "$DATA_HELPER" redaction-rules) || exit 1
 fi
-export GOOGLE_APPLICATION_CREDENTIALS="${credential_files[0]}"
-unset credential_paths credential_files credential_file
-# Keep a private in-memory snapshot, not a credential-bearing artifact file.
-REDACTION_RULES=$(python3 "$DATA_HELPER" redaction-rules) || exit 1
 
 # ---------------------------------------------------------------------------
 # Preflight: verify gcloud can reach GCS before spending an hour on builds.
@@ -715,7 +720,9 @@ if $CANCELLED; then
 fi
 set +m
 redaction_failed=false
-python3 "$DATA_HELPER" redact "$LOG_DIR" <<<"$REDACTION_RULES" || redaction_failed=true
+if [[ -n "$REDACTION_RULES" ]]; then
+	python3 "$DATA_HELPER" redact "$LOG_DIR" <<<"$REDACTION_RULES" || redaction_failed=true
+fi
 unset REDACTION_RULES
 
 # ---------------------------------------------------------------------------
